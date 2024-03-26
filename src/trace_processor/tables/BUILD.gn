@@ -23,9 +23,11 @@ perfetto_tp_tables("tables_python") {
     "memory_tables.py",
     "metadata_tables.py",
     "profiler_tables.py",
+    "sched_tables.py",
     "slice_tables.py",
     "trace_proto_tables.py",
     "track_tables.py",
+    "winscope_tables.py",
   ]
   generate_docs = true
 }

@@ -15,6 +15,9 @@
 
 import m from 'mithril';
 
+import {raf} from '../core/raf_scheduler';
+import {Spinner} from '../widgets/spinner';
+
 import {globals} from './globals';
 import {
   KeyboardLayoutMap,
@@ -23,7 +26,6 @@ import {
 } from './keyboard_layout_map';
 import {showModal} from './modal';
 import {KeyMapping} from './pan_and_zoom_handler';
-import {Spinner} from './widgets/spinner';
 
 export function toggleHelp() {
   globals.logging.logEvent('User Actions', 'Show help');
@@ -50,7 +52,7 @@ class KeyMappingsHelp implements m.ClassComponent {
     nativeKeyboardLayoutMap()
         .then((keyMap: KeyboardLayoutMap) => {
           this.keyMap = keyMap;
-          globals.rafScheduler.scheduleFullRedraw();
+          raf.scheduleFullRedraw();
         })
         .catch((e) => {
           if (e instanceof NotSupportedError ||
@@ -63,7 +65,7 @@ class KeyMappingsHelp implements m.ClassComponent {
             // The alternative would be to show key mappings for all keyboard
             // layouts which is not feasible.
             this.keyMap = new EnglishQwertyKeyboardLayoutMap();
-            globals.rafScheduler.scheduleFullRedraw();
+            raf.scheduleFullRedraw();
           } else {
             // Something unexpected happened. Either the browser doesn't conform
             // to the keyboard API spec, or the keyboard API spec has changed!
@@ -121,11 +123,16 @@ class KeyMappingsHelp implements m.ClassComponent {
           m('tr', m('td', 'Ctrl + Scroll wheel'), m('td', 'Zoom in/out')),
           m('tr', m('td', 'Click + Drag'), m('td', 'Select area')),
           m('tr', m('td', 'Shift + Click + Drag'), m('td', 'Pan left/right'))),
+        m('h2', 'Running commands from the viewer page'),
+        m('table',
+          m('tr',
+            m('td', keycap('>'), ' in the (empty) search box'),
+            m('td', 'Switch to command mode'))),
         m('h2', 'Making SQL queries from the viewer page'),
         m('table',
           m('tr',
             m('td', keycap(':'), ' in the (empty) search box'),
-            m('td', 'Switch to query input')),
+            m('td', 'Switch to query mode')),
           m('tr', m('td', keycap('Enter')), m('td', 'Execute query')),
           m('tr',
             m('td', keycap('Ctrl'), ' + ', keycap('Enter')),
@@ -168,6 +175,20 @@ class KeyMappingsHelp implements m.ClassComponent {
             m('tr',
               m('td', keycap(ctrlOrCmd), ' + ', keycap('a')),
               m('td', 'Select all')),
+            m('tr',
+              m('td',
+                keycap(ctrlOrCmd),
+                ' + ',
+                keycap('Shift'),
+                ' + ',
+                keycap('p')),
+              m('td', 'Open command palette')),
+            m('tr',
+              m('td', keycap(ctrlOrCmd), ' + ', keycap('o')),
+              m('td', 'Run query')),
+            m('tr',
+              m('td', keycap(ctrlOrCmd), ' + ', keycap('s')),
+              m('td', 'Search')),
             ...sidebarInstructions,
             m('tr', m('td', keycap('?')), m('td', 'Show help')),
             ));

@@ -61,15 +61,16 @@ std::unique_ptr<ProducerEndpoint> SystemProducerTracingBackend::ConnectProducer(
 #else
     shm = PosixSharedMemory::Create(shmem_size_hint);
 #endif
-    arbiter = SharedMemoryArbiter::CreateUnboundInstance(shm.get(),
-                                                         shmem_page_size_hint);
+    arbiter = SharedMemoryArbiter::CreateUnboundInstance(
+        shm.get(), shmem_page_size_hint, SharedMemoryABI::ShmemMode::kDefault);
   }
 
+  ipc::Client::ConnArgs conn_args(GetProducerSocket(), true);
   auto endpoint = ProducerIPCClient::Connect(
-      GetProducerSocket(), args.producer, args.producer_name, args.task_runner,
+      std::move(conn_args), args.producer, args.producer_name, args.task_runner,
       TracingService::ProducerSMBScrapingMode::kEnabled, shmem_size_hint,
       shmem_page_size_hint, std::move(shm), std::move(arbiter),
-      ProducerIPCClient::ConnectionFlags::kRetryIfUnreachable);
+      args.create_socket_async);
   PERFETTO_CHECK(endpoint);
   return endpoint;
 }

@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {EngineProxy} from '../common/engine';
-import {NUM, NUM_NULL, STR, STR_NULL} from '../common/query_result';
+import {EngineProxy} from '../trace_processor/engine';
+import {NUM, NUM_NULL, STR, STR_NULL} from '../trace_processor/query_result';
+
 import {Upid, Utid} from './sql_types';
 import {fromNumNull} from './sql_utils';
 
@@ -34,7 +35,7 @@ export interface ProcessInfo {
   versionCode?: number;
 }
 
-async function getProcessInfo(
+export async function getProcessInfo(
     engine: EngineProxy, upid: Upid): Promise<ProcessInfo> {
   const it = (await engine.query(`
               SELECT pid, name, uid FROM process WHERE upid = ${upid};
@@ -118,4 +119,12 @@ export async function getThreadInfo(
 
 export function getThreadName(info?: ThreadInfo): string|undefined {
   return getDisplayName(info?.name, info?.tid);
+}
+
+// Return the full thread name, including the process name.
+export function getFullThreadName(info?: ThreadInfo): string|undefined {
+  if (info?.process === undefined) {
+    return getThreadName(info);
+  }
+  return `${getThreadName(info)} ${getProcessName(info.process)}`;
 }

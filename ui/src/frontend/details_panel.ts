@@ -14,18 +14,17 @@
 
 import m from 'mithril';
 
+import {Trash} from '../base/disposable';
+import {Gate} from '../base/mithril_utils';
 import {Actions} from '../common/actions';
 import {isEmptyData} from '../common/aggregation_data';
 import {LogExists, LogExistsKey} from '../common/logs';
-import {pluginManager} from '../common/plugins';
 import {addSelectionChangeObserver} from '../common/selection_observer';
 import {Selection} from '../common/state';
-import {DebugSliceDetailsTab} from '../tracks/debug/details_tab';
-import {SCROLL_JANK_PLUGIN_ID} from '../tracks/scroll_jank';
-import {TOP_LEVEL_SCROLL_KIND} from '../tracks/scroll_jank/scroll_track';
+import {raf} from '../core/raf_scheduler';
 
 import {AggregationPanel} from './aggregation_panel';
-import {ChromeSliceDetailsPanel} from './chrome_slice_panel';
+import {ChromeSliceDetailsTab} from './chrome_slice_details_tab';
 import {CounterDetailsPanel} from './counter_panel';
 import {CpuProfileDetailsPanel} from './cpu_profile_panel';
 import {DEFAULT_DETAILS_CONTENT_HEIGHT} from './css_constants';
@@ -39,7 +38,6 @@ import {FtracePanel} from './ftrace_panel';
 import {globals} from './globals';
 import {LogPanel} from './logs_panel';
 import {NotesEditorTab} from './notes_panel';
-import {AnyAttrsVnode, PanelContainer} from './panel_container';
 import {PivotTable} from './pivot_table';
 import {SliceDetailsPanel} from './slice_details_panel';
 import {ThreadStateTab} from './thread_state_tab';
@@ -88,37 +86,42 @@ class DragHandle implements m.ClassComponent<DragHandleAttrs> {
   private height = 0;
   private previousHeight = this.height;
   private resize: (height: number) => void = () => {};
-  private isClosed = this.height <= DRAG_HANDLE_HEIGHT_PX;
+  private isClosed = this.height <= 0;
   private isFullscreen = false;
   // We can't get real fullscreen height until the pan_and_zoom_handler exists.
   private fullscreenHeight = getDetailsHeight();
+  private trash: Trash = new Trash();
 
   oncreate({dom, attrs}: m.CVnodeDOM<DragHandleAttrs>) {
     this.resize = attrs.resize;
     this.height = attrs.height;
-    this.isClosed = this.height <= DRAG_HANDLE_HEIGHT_PX;
+    this.isClosed = this.height <= 0;
     this.fullscreenHeight = getFullScreenHeight();
     const elem = dom as HTMLElement;
-    new DragGestureHandler(
+    this.trash.add(new DragGestureHandler(
         elem,
         this.onDrag.bind(this),
         this.onDragStart.bind(this),
-        this.onDragEnd.bind(this));
+        this.onDragEnd.bind(this)));
   }
 
   onupdate({attrs}: m.CVnodeDOM<DragHandleAttrs>) {
     this.resize = attrs.resize;
     this.height = attrs.height;
-    this.isClosed = this.height <= DRAG_HANDLE_HEIGHT_PX;
+    this.isClosed = this.height <= 0;
+  }
+
+  onremove(_: m.CVnodeDOM<DragHandleAttrs>) {
+    this.trash.dispose();
   }
 
   onDrag(_x: number, y: number) {
     const newHeight =
         Math.floor(this.dragStartHeight + (DRAG_HANDLE_HEIGHT_PX / 2) - y);
-    this.isClosed = newHeight <= DRAG_HANDLE_HEIGHT_PX;
+    this.isClosed = newHeight <= 0;
     this.isFullscreen = newHeight >= this.fullscreenHeight;
     this.resize(newHeight);
-    globals.rafScheduler.scheduleFullRedraw();
+    raf.scheduleFullRedraw();
   }
 
   onDragStart(_x: number, _y: number) {
@@ -153,7 +156,7 @@ class DragHandle implements m.ClassComponent<DragHandleAttrs> {
                 this.isClosed = false;
                 this.isFullscreen = true;
                 this.resize(this.fullscreenHeight);
-                globals.rafScheduler.scheduleFullRedraw();
+                raf.scheduleFullRedraw();
               },
               title: 'Open fullscreen',
               disabled: this.isFullscreen,
@@ -162,7 +165,7 @@ class DragHandle implements m.ClassComponent<DragHandleAttrs> {
           m('i.material-icons',
             {
               onclick: () => {
-                if (this.height === DRAG_HANDLE_HEIGHT_PX) {
+                if (this.height === 0) {
                   this.isClosed = false;
                   if (this.previousHeight === 0) {
                     this.previousHeight = getDetailsHeight();
@@ -172,9 +175,9 @@ class DragHandle implements m.ClassComponent<DragHandleAttrs> {
                   this.isFullscreen = false;
                   this.isClosed = true;
                   this.previousHeight = this.height;
-                  this.resize(DRAG_HANDLE_HEIGHT_PX);
+                  this.resize(0);
                 }
-                globals.rafScheduler.scheduleFullRedraw();
+                raf.scheduleFullRedraw();
               },
               title,
             },
@@ -182,7 +185,8 @@ class DragHandle implements m.ClassComponent<DragHandleAttrs> {
   }
 }
 
-function handleSelectionChange(newSelection?: Selection, _?: Selection): void {
+function handleSelectionChange(
+    newSelection: Selection|undefined, openCurrentSelectionTab: boolean): void {
   const currentSelectionTag = CURRENT_SELECTION_TAG;
   const bottomTabList = globals.bottomTabList;
   if (!bottomTabList) return;
@@ -198,6 +202,7 @@ function handleSelectionChange(newSelection?: Selection, _?: Selection): void {
         config: {
           id: newSelection.id,
         },
+        select: openCurrentSelectionTab,
       });
       break;
     case 'AREA':
@@ -208,6 +213,7 @@ function handleSelectionChange(newSelection?: Selection, _?: Selection): void {
           config: {
             id: newSelection.noteId,
           },
+          select: openCurrentSelectionTab,
         });
       }
       break;
@@ -218,21 +224,27 @@ function handleSelectionChange(newSelection?: Selection, _?: Selection): void {
         config: {
           id: newSelection.id,
         },
+        select: openCurrentSelectionTab,
       });
       break;
-    case 'DEBUG_SLICE':
+    case 'GENERIC_SLICE':
       bottomTabList.addTab({
-        kind: DebugSliceDetailsTab.kind,
+        kind: newSelection.detailsPanelConfig.kind,
+        tag: currentSelectionTag,
+        config: newSelection.detailsPanelConfig.config,
+        select: openCurrentSelectionTab,
+      });
+      break;
+    case 'CHROME_SLICE':
+      bottomTabList.addTab({
+        kind: ChromeSliceDetailsTab.kind,
         tag: currentSelectionTag,
         config: {
-          sqlTableName: newSelection.sqlTableName,
           id: newSelection.id,
+          table: newSelection.table,
         },
+        select: openCurrentSelectionTab,
       });
-      break;
-    case TOP_LEVEL_SCROLL_KIND:
-      pluginManager.onDetailsPanelSelectionChange(
-          SCROLL_JANK_PLUGIN_ID, newSelection);
       break;
     default:
       bottomTabList.closeTabByTag(currentSelectionTag);
@@ -247,7 +259,7 @@ export class DetailsPanel implements m.ClassComponent {
     interface DetailsPanel {
       key: string;
       name: string;
-      vnode: AnyAttrsVnode;
+      vnode: m.Children;
     }
 
     const detailsPanels: DetailsPanel[] = [];
@@ -257,7 +269,7 @@ export class DetailsPanel implements m.ClassComponent {
         detailsPanels.push({
           key: tab.tag ?? tab.uuid,
           name: tab.getTitle(),
-          vnode: tab.createPanelVnode(),
+          vnode: tab.renderPanel(),
         });
       }
     }
@@ -310,13 +322,6 @@ export class DetailsPanel implements m.ClassComponent {
             vnode: m(CpuProfileDetailsPanel, {
               key: 'cpu_profile_sample',
             }),
-          });
-          break;
-        case 'CHROME_SLICE':
-          detailsPanels.push({
-            key: 'current_selection',
-            name: 'Current Selection',
-            vnode: m(ChromeSliceDetailsPanel, {key: 'chrome_slice'}),
           });
           break;
         default:
@@ -390,27 +395,32 @@ export class DetailsPanel implements m.ClassComponent {
     }
 
     const panel = currentTabDetails?.vnode;
-    const panels = panel ? [panel] : [];
 
-    return m(
-        '.details-content',
-        {
-          style: {
-            height: `${this.detailsHeight}px`,
-            display: detailsPanels.length > 0 ? null : 'none',
-          },
+    if (!panel) {
+      return null;
+    }
+
+    return [
+      m(DragHandle, {
+        resize: (height: number) => {
+          this.detailsHeight = Math.max(height, 0);
         },
-        m(DragHandle, {
-          resize: (height: number) => {
-            this.detailsHeight = Math.max(height, DRAG_HANDLE_HEIGHT_PX);
-          },
-          height: this.detailsHeight,
-          tabs: detailsPanels.map((tab) => {
-            return {key: tab.key, name: tab.name};
-          }),
-          currentTabKey: currentTabDetails?.key,
+        height: this.detailsHeight,
+        tabs: detailsPanels.map((tab) => {
+          return {key: tab.key, name: tab.name};
         }),
-        m('.details-panel-container.x-scrollable',
-          m(PanelContainer, {doesScroll: true, panels, kind: 'DETAILS'})));
+        currentTabKey: currentTabDetails?.key,
+      }),
+      m(
+          '.details-panel-container',
+          {
+            style: {height: `${this.detailsHeight}px`},
+          },
+          detailsPanels.map((tab) => {
+            const active = tab === currentTabDetails;
+            return m(Gate, {open: active}, tab.vnode);
+          }),
+          ),
+    ];
   }
 }

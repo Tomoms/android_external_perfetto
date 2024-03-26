@@ -47,7 +47,7 @@ PROCESS_TABLE = Table(
     wrapping_sql_view=WrappingSqlView(view_name='process',),
     tabledoc=TableDoc(
         doc='Contains information of processes seen during the trace',
-        group='Misc',
+        group='Metadata',
         skip_id_and_type=True,
         columns={
             'upid':
@@ -116,7 +116,7 @@ THREAD_TABLE = Table(
     wrapping_sql_view=WrappingSqlView(view_name='thread',),
     tabledoc=TableDoc(
         doc='Contains information of threads seen during the trace',
-        group='Misc',
+        group='Metadata',
         skip_id_and_type=True,
         columns={
             'utid':
@@ -170,6 +170,7 @@ RAW_TABLE = Table(
         C('cpu', CppUint32()),
         C('utid', CppTableId(THREAD_TABLE)),
         C('arg_set_id', CppUint32()),
+        C('common_flags', CppUint32())
     ],
     tabledoc=TableDoc(
         doc='''
@@ -177,7 +178,7 @@ RAW_TABLE = Table(
           table only exists for debugging purposes and should not be relied on
           in production usecases (i.e. metrics, standard library etc).
         ''',
-        group='Misc',
+        group='Events',
         columns={
             'arg_set_id':
                 ColumnDoc(
@@ -193,7 +194,9 @@ RAW_TABLE = Table(
             'cpu':
                 'The CPU this event was emitted on.',
             'utid':
-                'The thread this event was emitted on.'
+                'The thread this event was emitted on.',
+            'common_flags':
+                'Ftrace event flags for this event. Currently only emitted for sched_waking events.'
         }))
 
 FTRACE_EVENT_TABLE = Table(
@@ -204,12 +207,12 @@ FTRACE_EVENT_TABLE = Table(
     columns=[],
     tabledoc=TableDoc(
         doc='''
-      Contains all the ftrace events in the trace. This table exists only for
-      debugging purposes and should not be relied on in production usecases
-      (i.e. metrics, standard library etc). Note also that this table might
-      be empty if raw ftrace parsing has been disabled.
-    ''',
-        group='Misc',
+          Contains all the ftrace events in the trace. This table exists only
+          for debugging purposes and should not be relied on in production
+          usecases (i.e. metrics, standard library etc). Note also that this
+          table might be empty if raw ftrace parsing has been disabled.
+        ''',
+        group='Events',
         columns={}))
 
 ARG_TABLE = Table(
@@ -251,7 +254,7 @@ METADATA_TABLE = Table(
     ],
     tabledoc=TableDoc(
         doc='''''',
-        group='Misc',
+        group='Metadata',
         columns={
             'name': '''''',
             'key_type': '''''',
@@ -274,7 +277,7 @@ FILEDESCRIPTOR_TABLE = Table(
         doc='''
           Contains information of filedescriptors collected during the trace
         ''',
-        group='Misc',
+        group='Metadata',
         columns={
             'ufd':
                 '''Unique fd. This is != the OS fd.
@@ -308,7 +311,7 @@ EXP_MISSING_CHROME_PROC_TABLE = Table(
         doc='''
           Experimental table, subject to arbitrary breaking changes.
         ''',
-        group='Misc',
+        group='Chrome',
         columns={
             'upid': '''''',
             'reliable_from': ''''''

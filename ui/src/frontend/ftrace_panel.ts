@@ -13,21 +13,22 @@
 // limitations under the License.
 
 import m from 'mithril';
-import {StringListPatch} from 'src/common/state';
 
-import {assertExists} from '../base/logging';
+import {time, Time} from '../base/time';
 import {Actions} from '../common/actions';
-import {colorForString} from '../common/colorizer';
-import {formatTPTime, TPTime} from '../common/time';
-
-import {globals} from './globals';
-import {Panel} from './panel';
+import {colorForFtrace} from '../common/colorizer';
+import {StringListPatch} from '../common/state';
+import {DetailsShell} from '../widgets/details_shell';
 import {
-  MultiSelect,
   MultiSelectDiff,
   Option as MultiSelectOption,
-} from './widgets/multiselect';
-import {PopupPosition} from './widgets/popup';
+  PopupMultiSelect,
+} from '../widgets/multiselect';
+import {PopupPosition} from '../widgets/popup';
+import {VirtualScrollContainer} from '../widgets/virtual_scroll_container';
+
+import {globals} from './globals';
+import {Timestamp} from './widgets/timestamp';
 
 const ROW_H = 20;
 const PAGE_SIZE = 250;
@@ -49,38 +50,25 @@ const PAGE_SIZE = 250;
 // Another call to view() can come at any time, as a reusult of the controller
 // giving us some data.
 //
-export class FtracePanel extends Panel<{}> {
+export class FtracePanel implements m.ClassComponent {
   private page: number = 0;
   private pageCount: number = 0;
 
   view(_: m.CVnode<{}>) {
     return m(
-        '.ftrace-panel',
+        DetailsShell,
+        {
+          title: this.renderTitle(),
+          buttons: this.renderFilterPanel(),
+        },
         m(
-            '.sticky',
-            [
-              this.renderRowsLabel(),
-              this.renderFilterPanel(),
-            ],
+            VirtualScrollContainer,
+            {
+              onScroll: this.onScroll,
+            },
+            m('.ftrace-panel', this.renderRows()),
             ),
-        this.renderRows(),
     );
-  }
-
-  private scrollContainer(dom: Element): HTMLElement {
-    const el = dom.parentElement!.parentElement!.parentElement;
-    return assertExists(el);
-  }
-
-  oncreate({dom}: m.CVnodeDOM) {
-    const sc = this.scrollContainer(dom);
-    sc.addEventListener('scroll', this.onScroll);
-    this.recomputeVisibleRowsAndUpdate(sc);
-  }
-
-  onupdate({dom}: m.CVnodeDOM) {
-    const sc = this.scrollContainer(dom);
-    this.recomputeVisibleRowsAndUpdate(sc);
   }
 
   recomputeVisibleRowsAndUpdate(scrollContainer: HTMLElement) {
@@ -102,35 +90,31 @@ export class FtracePanel extends Panel<{}> {
     }
   }
 
-  onremove({dom}: m.CVnodeDOM) {
-    const sc = this.scrollContainer(dom);
-    sc.removeEventListener('scroll', this.onScroll);
-
+  onremove(_: m.CVnodeDOM) {
     globals.dispatch(Actions.updateFtracePagination({
       offset: 0,
       count: 0,
     }));
   }
 
-  onScroll = (e: Event) => {
-    const scrollContainer = e.target as HTMLElement;
-    this.recomputeVisibleRowsAndUpdate(scrollContainer);
+  onScroll = (container: HTMLElement) => {
+    this.recomputeVisibleRowsAndUpdate(container);
   };
 
-  onRowOver(ts: TPTime) {
+  onRowOver(ts: time) {
     globals.dispatch(Actions.setHoverCursorTimestamp({ts}));
   }
 
   onRowOut() {
-    globals.dispatch(Actions.setHoverCursorTimestamp({ts: -1n}));
+    globals.dispatch(Actions.setHoverCursorTimestamp({ts: Time.INVALID}));
   }
 
-  private renderRowsLabel() {
+  private renderTitle() {
     if (globals.ftracePanelData) {
       const {numEvents} = globals.ftracePanelData;
-      return m('.ftrace-rows-label', `Ftrace Events (${numEvents})`);
+      return `Ftrace Events (${numEvents})`;
     } else {
-      return m('.ftrace-rows-label', 'Ftrace Rows');
+      return 'Ftrace Rows';
     }
   }
 
@@ -150,9 +134,10 @@ export class FtracePanel extends Panel<{}> {
         });
 
     return m(
-        MultiSelect,
+        PopupMultiSelect,
         {
-          label: 'Filter by name',
+          label: 'Filter',
+          minimal: true,
           icon: 'filter_list_alt',
           popupPosition: PopupPosition.Top,
           options,
@@ -188,16 +173,11 @@ export class FtracePanel extends Panel<{}> {
       for (let i = 0; i < events.length; i++) {
         const {ts, name, cpu, process, args} = events[i];
 
-        const timestamp = formatTPTime(ts - globals.state.traceTime.start);
+        const timestamp = m(Timestamp, {ts});
 
         const rank = i + offset;
 
-        const color = colorForString(name);
-        const hsl = `hsl(
-          ${color.h},
-          ${color.s - 20}%,
-          ${Math.min(color.l + 10, 60)}%
-        )`;
+        const color = colorForFtrace(name).base.cssString;
 
         rows.push(m(
             `.row`,
@@ -207,7 +187,7 @@ export class FtracePanel extends Panel<{}> {
               onmouseout: this.onRowOut.bind(this),
             },
             m('.cell', timestamp),
-            m('.cell', m('span.colour', {style: {background: hsl}}), name),
+            m('.cell', m('span.colour', {style: {background: color}}), name),
             m('.cell', cpu),
             m('.cell', process),
             m('.cell', args),
@@ -218,6 +198,4 @@ export class FtracePanel extends Panel<{}> {
       return m('.rows', rows);
     }
   }
-
-  renderCanvas() {}
 }

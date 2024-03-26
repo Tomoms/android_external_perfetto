@@ -14,15 +14,115 @@
 
 import m from 'mithril';
 
-import {tpTimeToCode} from '../../common/time';
-import {toTraceTime, TPTimestamp} from '../sql_types';
+import {copyToClipboard} from '../../base/clipboard';
+import {Icons} from '../../base/semantic_icons';
+import {time, Time} from '../../base/time';
+import {Actions} from '../../common/actions';
+import {
+  setTimestampFormat,
+  TimestampFormat,
+  timestampFormat,
+} from '../../common/timestamp_format';
+import {raf} from '../../core/raf_scheduler';
+import {Anchor} from '../../widgets/anchor';
+import {MenuDivider, MenuItem, PopupMenu2} from '../../widgets/menu';
+import {globals} from '../globals';
+
+// import {MenuItem, PopupMenu2} from './menu';
 
 interface TimestampAttrs {
-  ts: TPTimestamp;
+  // The timestamp to print, this should be the absolute, raw timestamp as
+  // found in trace processor.
+  ts: time;
+  // Custom text value to show instead of the default HH:MM:SS.mmm uuu nnn
+  // formatting.
+  display?: m.Children;
+  extraMenuItems?: m.Child[];
 }
 
 export class Timestamp implements m.ClassComponent<TimestampAttrs> {
-  view(vnode: m.Vnode<TimestampAttrs>) {
-    return tpTimeToCode(toTraceTime(vnode.attrs.ts));
+  view({attrs}: m.Vnode<TimestampAttrs>) {
+    const {ts} = attrs;
+    return m(
+        PopupMenu2,
+        {
+          trigger:
+              m(Anchor,
+                {
+                  onmouseover: () => {
+                    globals.dispatch(Actions.setHoverCursorTimestamp({ts}));
+                  },
+                  onmouseout: () => {
+                    globals.dispatch(
+                        Actions.setHoverCursorTimestamp({ts: Time.INVALID}));
+                  },
+                },
+                attrs.display ?? renderTimestamp(ts)),
+        },
+        m(MenuItem, {
+          icon: Icons.Copy,
+          label: `Copy raw value`,
+          onclick: () => {
+            copyToClipboard(ts.toString());
+          },
+        }),
+        m(
+            MenuItem,
+            {
+              label: 'Time format',
+            },
+            menuItemForFormat(TimestampFormat.Timecode, 'Timecode'),
+            menuItemForFormat(TimestampFormat.UTC, 'Realtime (UTC)'),
+            menuItemForFormat(TimestampFormat.Seconds, 'Seconds'),
+            menuItemForFormat(TimestampFormat.Raw, 'Raw'),
+            menuItemForFormat(
+                TimestampFormat.RawLocale,
+                'Raw (with locale-specific formatting)'),
+            ),
+        attrs.extraMenuItems ? [m(MenuDivider), attrs.extraMenuItems] : null,
+    );
   }
+}
+
+export function menuItemForFormat(
+    value: TimestampFormat, label: string): m.Children {
+  return m(MenuItem, {
+    label,
+    active: value === timestampFormat(),
+    onclick: () => {
+      setTimestampFormat(value);
+      raf.scheduleFullRedraw();
+    },
+  });
+}
+
+function renderTimestamp(time: time): m.Children {
+  const fmt = timestampFormat();
+  const domainTime = globals.toDomainTime(time);
+  switch (fmt) {
+    case TimestampFormat.UTC:
+    case TimestampFormat.Timecode:
+      return renderTimecode(domainTime);
+    case TimestampFormat.Raw:
+      return domainTime.toString();
+    case TimestampFormat.RawLocale:
+      return domainTime.toLocaleString();
+    case TimestampFormat.Seconds:
+      return Time.formatSeconds(domainTime);
+    default:
+      const x: never = fmt;
+      throw new Error(`Invalid timestamp ${x}`);
+  }
+}
+
+export function renderTimecode(time: time): m.Children {
+  const {dhhmmss, millis, micros, nanos} = Time.toTimecode(time);
+  return m(
+      'span.pf-timecode',
+      m('span.pf-timecode-hms', dhhmmss),
+      '.',
+      m('span.pf-timecode-millis', millis),
+      m('span.pf-timecode-micros', micros),
+      m('span.pf-timecode-nanos', nanos),
+  );
 }

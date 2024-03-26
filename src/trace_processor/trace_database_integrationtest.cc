@@ -15,6 +15,7 @@
  */
 
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <optional>
 #include <random>
@@ -22,6 +23,7 @@
 
 #include "perfetto/base/logging.h"
 #include "perfetto/ext/base/scoped_file.h"
+#include "perfetto/trace_processor/basic_types.h"
 #include "perfetto/trace_processor/trace_processor.h"
 #include "protos/perfetto/common/descriptor.pbzero.h"
 #include "protos/perfetto/trace_processor/trace_processor.pbzero.h"
@@ -396,25 +398,197 @@ TEST_F(TraceProcessorIntegrationTest, MAYBE_Clusterfuzz28766) {
   ASSERT_TRUE(LoadTrace("clusterfuzz_28766", 4096).ok());
 }
 
-TEST_F(TraceProcessorIntegrationTest, RestoreInitialTables) {
+TEST_F(TraceProcessorIntegrationTest, RestoreInitialTablesInvariant) {
   ASSERT_TRUE(LoadTrace("android_sched_and_ps.pb").ok());
+  uint64_t first_restore = RestoreInitialTables();
+  ASSERT_EQ(RestoreInitialTables(), first_restore);
+}
+
+TEST_F(TraceProcessorIntegrationTest, RestoreInitialTablesPerfettoSql) {
+  ASSERT_TRUE(LoadTrace("android_sched_and_ps.pb").ok());
+  RestoreInitialTables();
 
   for (int repeat = 0; repeat < 3; repeat++) {
     ASSERT_EQ(RestoreInitialTables(), 0u);
 
-    auto it = Query("CREATE TABLE user1(unused text);");
-    it.Next();
-    ASSERT_TRUE(it.Status().ok());
+    // 1. Perfetto table
+    {
+      auto it = Query("CREATE PERFETTO TABLE obj1 AS SELECT 1 AS col;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    // 2. Perfetto view
+    {
+      auto it = Query("CREATE PERFETTO VIEW obj2 AS SELECT * FROM stats;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    // 3. Runtime function
+    {
+      auto it = Query("CREATE PERFETTO FUNCTION obj3() RETURNS INT AS 1;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    // 4. Runtime table function
+    {
+      auto it = Query(
+          "CREATE PERFETTO FUNCTION obj4() RETURNS TABLE(col INT) AS SELECT 1 "
+          "AS col;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    // 5. Macro
+    {
+      auto it = Query("CREATE PERFETTO MACRO obj5(a Expr) returns Expr AS $a;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    {
+      auto it = Query("obj5!(SELECT 1);");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    ASSERT_EQ(RestoreInitialTables(), 5u);
+  }
+}
 
-    it = Query("CREATE TEMPORARY TABLE user2(unused text);");
-    it.Next();
-    ASSERT_TRUE(it.Status().ok());
+TEST_F(TraceProcessorIntegrationTest, RestoreInitialTablesStandardSqlite) {
+  ASSERT_TRUE(LoadTrace("android_sched_and_ps.pb").ok());
+  RestoreInitialTables();
 
-    it = Query("CREATE VIEW user3 AS SELECT * FROM stats;");
-    it.Next();
-    ASSERT_TRUE(it.Status().ok());
-
+  for (int repeat = 0; repeat < 3; repeat++) {
+    ASSERT_EQ(RestoreInitialTables(), 0u);
+    {
+      auto it = Query("CREATE TABLE obj1(unused text);");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    {
+      auto it = Query("CREATE TEMPORARY TABLE obj2(unused text);");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    // Add a view
+    {
+      auto it = Query("CREATE VIEW obj3 AS SELECT * FROM stats;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
     ASSERT_EQ(RestoreInitialTables(), 3u);
+  }
+}
+
+TEST_F(TraceProcessorIntegrationTest, RestoreInitialTablesModules) {
+  ASSERT_TRUE(LoadTrace("android_sched_and_ps.pb").ok());
+  RestoreInitialTables();
+
+  for (int repeat = 0; repeat < 3; repeat++) {
+    ASSERT_EQ(RestoreInitialTables(), 0u);
+    {
+      auto it = Query("INCLUDE PERFETTO MODULE common.timestamps;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    {
+      auto it = Query("SELECT trace_start();");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    RestoreInitialTables();
+  }
+}
+
+TEST_F(TraceProcessorIntegrationTest, RestoreInitialTablesSpanJoin) {
+  ASSERT_TRUE(LoadTrace("android_sched_and_ps.pb").ok());
+  RestoreInitialTables();
+
+  for (int repeat = 0; repeat < 3; repeat++) {
+    ASSERT_EQ(RestoreInitialTables(), 0u);
+    {
+      auto it = Query(
+          "CREATE TABLE t1(ts BIGINT, dur BIGINT, PRIMARY KEY (ts, dur)) "
+          "WITHOUT ROWID;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    {
+      auto it = Query(
+          "CREATE TABLE t2(ts BIGINT, dur BIGINT, PRIMARY KEY (ts, dur)) "
+          "WITHOUT ROWID;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    {
+      auto it = Query("INSERT INTO t2(ts, dur) VALUES(1, 2), (5, 0), (1, 1);");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    {
+      auto it = Query("CREATE VIRTUAL TABLE sp USING span_join(t1, t2);;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    {
+      auto it = Query("SELECT ts, dur FROM sp;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    ASSERT_EQ(RestoreInitialTables(), 3u);
+  }
+}
+
+TEST_F(TraceProcessorIntegrationTest, RestoreInitialTablesWithClause) {
+  ASSERT_TRUE(LoadTrace("android_sched_and_ps.pb").ok());
+  RestoreInitialTables();
+
+  for (int repeat = 0; repeat < 3; repeat++) {
+    ASSERT_EQ(RestoreInitialTables(), 0u);
+    {
+      auto it = Query(
+          "CREATE PERFETTO TABLE foo AS WITH bar AS (SELECT * FROM slice) "
+          "SELECT ts FROM bar;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    ASSERT_EQ(RestoreInitialTables(), 1u);
+  }
+}
+
+TEST_F(TraceProcessorIntegrationTest, RestoreInitialTablesIndex) {
+  ASSERT_TRUE(LoadTrace("android_sched_and_ps.pb").ok());
+  RestoreInitialTables();
+
+  for (int repeat = 0; repeat < 3; repeat++) {
+    ASSERT_EQ(RestoreInitialTables(), 0u);
+    {
+      auto it = Query("CREATE TABLE foo AS SELECT * FROM slice;");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    {
+      auto it = Query("CREATE INDEX ind ON foo (ts, track_id);");
+      it.Next();
+      ASSERT_TRUE(it.Status().ok());
+    }
+    ASSERT_EQ(RestoreInitialTables(), 2u);
+  }
+}
+
+TEST_F(TraceProcessorIntegrationTest, RestoreInitialTablesTraceBounds) {
+  ASSERT_TRUE(LoadTrace("android_sched_and_ps.pb").ok());
+  {
+    auto it = Query("SELECT * from trace_bounds;");
+    it.Next();
+    ASSERT_TRUE(it.Status().ok());
+    ASSERT_EQ(it.Get(0).AsLong(), 81473009948313l);
+  }
+
+  ASSERT_EQ(RestoreInitialTables(), 0u);
+  {
+    auto it = Query("SELECT * from trace_bounds;");
+    it.Next();
+    ASSERT_TRUE(it.Status().ok());
+    ASSERT_EQ(it.Get(0).AsLong(), 81473009948313l);
   }
 }
 
@@ -484,6 +658,60 @@ TEST_F(TraceProcessorIntegrationTest, TraceWithUuidReadInParts) {
   auto it = Query("select str_value from metadata where name = 'trace_uuid'");
   ASSERT_TRUE(it.Next());
   EXPECT_STREQ(it.Get(0).string_value, "123e4567-e89b-12d3-a456-426655443322");
+}
+
+TEST_F(TraceProcessorIntegrationTest, ErrorMessageExecuteQuery) {
+  auto it = Query("select t from slice");
+  ASSERT_FALSE(it.Next());
+  ASSERT_FALSE(it.Status().ok());
+
+  ASSERT_THAT(it.Status().message(),
+              testing::Eq(R"(Traceback (most recent call last):
+  File "stdin" line 1 col 8
+    select t from slice
+           ^
+no such column: t)"));
+}
+
+TEST_F(TraceProcessorIntegrationTest, ErrorMessageMetricFile) {
+  ASSERT_TRUE(
+      Processor()->RegisterMetric("foo/bar.sql", "select t from slice").ok());
+
+  auto it = Query("select RUN_METRIC('foo/bar.sql');");
+  ASSERT_FALSE(it.Next());
+  ASSERT_FALSE(it.Status().ok());
+
+  ASSERT_EQ(it.Status().message(),
+            R"(Traceback (most recent call last):
+  File "stdin" line 1 col 1
+    select RUN_METRIC('foo/bar.sql')
+    ^
+  Metric file "foo/bar.sql" line 1 col 8
+    select t from slice
+           ^
+no such column: t)");
+}
+
+TEST_F(TraceProcessorIntegrationTest, ErrorMessageModule) {
+  SqlModule module;
+  module.name = "foo";
+  module.files.push_back(std::make_pair("foo.bar", "select t from slice"));
+
+  ASSERT_TRUE(Processor()->RegisterSqlModule(module).ok());
+
+  auto it = Query("include perfetto module foo.bar;");
+  ASSERT_FALSE(it.Next());
+  ASSERT_FALSE(it.Status().ok());
+
+  ASSERT_EQ(it.Status().message(),
+            R"(Traceback (most recent call last):
+  File "stdin" line 1 col 1
+    include perfetto module foo.bar
+    ^
+  Module include "foo.bar" line 1 col 8
+    select t from slice
+           ^
+no such column: t)");
 }
 
 }  // namespace

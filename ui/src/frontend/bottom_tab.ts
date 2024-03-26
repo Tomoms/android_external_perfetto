@@ -15,12 +15,14 @@
 import m from 'mithril';
 import {v4 as uuidv4} from 'uuid';
 
+import {stringifyJsonWithBigints} from '../base/json_utils';
 import {Actions} from '../common/actions';
-import {EngineProxy} from '../common/engine';
+import {traceEvent} from '../common/metatracing';
 import {Registry} from '../common/registry';
-import {globals} from './globals';
+import {raf} from '../core/raf_scheduler';
+import {EngineProxy} from '../trace_processor/engine';
 
-import {Panel, PanelSize, PanelVNode} from './panel';
+import {globals} from './globals';
 
 export interface NewBottomTabArgs {
   engine: EngineProxy;
@@ -86,7 +88,7 @@ export abstract class BottomTabBase<Config = {}> {
   abstract getTitle(): string;
 
   // Generate a mithril node for this component.
-  abstract createPanelVnode(): PanelVNode;
+  abstract renderPanel(): m.Children;
 
   // API for the tab to notify the TabList that it's still preparing the data.
   // If true, adding a new tab will be delayed for a short while (~50ms) to
@@ -111,14 +113,13 @@ export abstract class BottomTab<Config = {}> extends BottomTabBase<Config> {
     super(args);
   }
 
-  // These methods are direct counterparts to renderCanvas and view with
-  // slightly changes names to prevent cases when `BottomTab` will
-  // be accidentally used a mithril component.
-  abstract renderTabCanvas(ctx: CanvasRenderingContext2D, size: PanelSize):
-      void;
   abstract viewTab(): void|m.Children;
 
-  createPanelVnode(): m.Vnode<any, any> {
+  close(): void {
+    closeTab(this.uuid);
+  }
+
+  renderPanel(): m.Children {
     return m(
         BottomTabAdapter,
         {key: this.uuid, panel: this} as BottomTabAdapterAttrs);
@@ -129,13 +130,7 @@ interface BottomTabAdapterAttrs {
   panel: BottomTab;
 }
 
-class BottomTabAdapter extends Panel<BottomTabAdapterAttrs> {
-  renderCanvas(
-      ctx: CanvasRenderingContext2D, size: PanelSize,
-      vnode: PanelVNode<BottomTabAdapterAttrs>): void {
-    vnode.attrs.panel.renderTabCanvas(ctx, size);
-  }
-
+class BottomTabAdapter implements m.ClassComponent<BottomTabAdapterAttrs> {
   view(vnode: m.CVnode<BottomTabAdapterAttrs>): void|m.Children {
     return vnode.attrs.panel.viewTab();
   }
@@ -163,7 +158,7 @@ addTab(args: AddTabArgs) {
     return;
   }
   tabList.addTab(args);
-  globals.rafScheduler.scheduleFullRedraw();
+  raf.scheduleFullRedraw();
 }
 
 
@@ -176,7 +171,7 @@ closeTab(uuid: string) {
     return;
   }
   tabList.closeTabById(uuid);
-  globals.rafScheduler.scheduleFullRedraw();
+  raf.scheduleFullRedraw();
 }
 
 interface PendingTab {
@@ -207,23 +202,32 @@ export class BottomTabList {
   // created panel (which can be used in the future to close it).
   addTab(args: AddTabArgs): AddTabResult {
     const uuid = uuidv4();
-    const newPanel = bottomTabRegistry.get(args.kind).create({
-      engine: this.engine,
-      uuid,
-      config: args.config,
-      tag: args.tag,
-    });
+    return traceEvent('addTab', () => {
+      const newPanel = bottomTabRegistry.get(args.kind).create({
+        engine: this.engine,
+        uuid,
+        config: args.config,
+        tag: args.tag,
+      });
 
-    this.pendingTabs.push({
-      tab: newPanel,
-      args,
-      startTime: window.performance.now(),
-    });
-    this.flushPendingTabs();
+      this.pendingTabs.push({
+        tab: newPanel,
+        args,
+        startTime: window.performance.now(),
+      });
+      this.flushPendingTabs();
 
-    return {
-      uuid,
-    };
+      return {
+        uuid,
+      };
+    }, {
+      args: {
+        'uuid': uuid,
+        'kind': args.kind,
+        'tag': args.tag ?? '<undefined>',
+        'config': stringifyJsonWithBigints(args.config),
+      },
+    });
   }
 
   closeTabByTag(tag: string) {
@@ -257,7 +261,7 @@ export class BottomTabList {
       globals.dispatch(Actions.setCurrentTab(
           {tab: tabSelectionKey(this.tabs[newActiveIndex])}));
     }
-    globals.rafScheduler.scheduleFullRedraw();
+    raf.scheduleFullRedraw();
   }
 
   // Check the list of the pending tabs and add the ones that are ready
@@ -297,19 +301,30 @@ export class BottomTabList {
         // The first tab is not ready yet, wait.
         return;
       }
-      this.pendingTabs.shift();
 
-      const index =
-          args.tag ? this.tabs.findIndex((tab) => tab.tag === args.tag) : -1;
-      if (index === -1) {
-        this.tabs.push(tab);
-      } else {
-        this.tabs[index] = tab;
-      }
+      traceEvent('addPendingTab', () => {
+        this.pendingTabs.shift();
 
-      if (args.select === undefined || args.select === true) {
-        globals.dispatch(Actions.setCurrentTab({tab: tabSelectionKey(tab)}));
-      }
+        const index =
+            args.tag ? this.tabs.findIndex((tab) => tab.tag === args.tag) : -1;
+        if (index === -1) {
+          this.tabs.push(tab);
+        } else {
+          this.tabs[index] = tab;
+        }
+
+        if (args.select === undefined || args.select === true) {
+          globals.dispatch(Actions.setCurrentTab({tab: tabSelectionKey(tab)}));
+        }
+        // setCurrentTab will usually schedule a redraw, but not if we replace
+        // the tab with the same tag, so we force an update here.
+        raf.scheduleFullRedraw();
+      }, {
+        args: {
+          'uuid': tab.uuid,
+          'is_loading': tab.isLoading().toString(),
+        },
+      });
     }
   }
 

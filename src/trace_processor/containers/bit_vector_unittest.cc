@@ -19,6 +19,8 @@
 #include <bitset>
 #include <random>
 
+#include "perfetto/protozero/scattered_heap_buffer.h"
+#include "protos/perfetto/trace_processor/serialization.pbzero.h"
 #include "src/trace_processor/containers/bit_vector_iterators.h"
 #include "test/gtest_and_gmock.h"
 
@@ -532,9 +534,7 @@ TEST(BitVectorUnittest, RangeStressTest) {
 }
 
 TEST(BitVectorUnittest, BuilderSkip) {
-  BitVector::Builder builder(128);
-
-  builder.Skip(127);
+  BitVector::Builder builder(128, 127);
   builder.Append(1);
 
   BitVector bv = std::move(builder).Build();
@@ -639,10 +639,42 @@ TEST(BitVectorUnittest, BuilderStressTest) {
 TEST(BitVectorUnittest, Not) {
   BitVector bv(10);
   bv.Set(2);
+  bv.Not();
 
-  BitVector not_bv = bv.Not();
-  EXPECT_FALSE(not_bv.IsSet(2));
-  EXPECT_EQ(not_bv.CountSetBits(), 9u);
+  EXPECT_FALSE(bv.IsSet(2));
+  EXPECT_EQ(bv.CountSetBits(), 9u);
+}
+
+TEST(BitVectorUnittest, NotBig) {
+  BitVector bv =
+      BitVector::Range(0, 1026, [](uint32_t i) { return i % 5 == 0; });
+  bv.Not();
+
+  EXPECT_EQ(bv.CountSetBits(), 820u);
+}
+
+TEST(BitVectorUnittest, Or) {
+  BitVector bv{1, 1, 0, 0};
+  BitVector bv_second{1, 0, 1, 0};
+  bv.Or(bv_second);
+
+  ASSERT_EQ(bv.CountSetBits(), 3u);
+  ASSERT_TRUE(bv.Set(0));
+  ASSERT_TRUE(bv.Set(1));
+  ASSERT_TRUE(bv.Set(2));
+}
+
+TEST(BitVectorUnittest, OrBig) {
+  BitVector bv =
+      BitVector::Range(0, 1025, [](uint32_t i) { return i % 5 == 0; });
+  BitVector bv_sec =
+      BitVector::Range(0, 1025, [](uint32_t i) { return i % 3 == 0; });
+  bv.Or(bv_sec);
+
+  BitVector bv_or = BitVector::Range(
+      0, 1025, [](uint32_t i) { return i % 5 == 0 || i % 3 == 0; });
+
+  ASSERT_EQ(bv.CountSetBits(), bv_or.CountSetBits());
 }
 
 TEST(BitVectorUnittest, QueryStressTest) {
@@ -688,6 +720,38 @@ TEST(BitVectorUnittest, QueryStressTest) {
     set_it.Next();
   }
   ASSERT_FALSE(set_it);
+}
+
+TEST(BitVectorUnittest, SerializeSimple) {
+  BitVector bv{1, 0, 1, 0, 1, 0, 1};
+  protozero::HeapBuffered<protos::pbzero::SerializedColumn::BitVector> msg;
+  bv.Serialize(msg.get());
+  auto buffer = msg.SerializeAsArray();
+
+  protos::pbzero::SerializedColumn::BitVector::Decoder decoder(buffer.data(),
+                                                               buffer.size());
+  ASSERT_EQ(decoder.size(), 7u);
+}
+
+TEST(BitVectorUnittest, SerializeDeserializeSimple) {
+  BitVector bv{1, 0, 1, 0, 1, 0, 1};
+  protozero::HeapBuffered<protos::pbzero::SerializedColumn::BitVector> msg;
+  bv.Serialize(msg.get());
+  auto buffer = msg.SerializeAsArray();
+
+  protos::pbzero::SerializedColumn::BitVector::Decoder decoder(buffer.data(),
+                                                               buffer.size());
+
+  BitVector des;
+  des.Deserialize(decoder);
+
+  ASSERT_EQ(des.size(), 7u);
+  ASSERT_EQ(des.CountSetBits(), 4u);
+
+  ASSERT_TRUE(des.IsSet(0));
+  ASSERT_TRUE(des.IsSet(2));
+  ASSERT_TRUE(des.IsSet(4));
+  ASSERT_TRUE(des.IsSet(6));
 }
 
 }  // namespace

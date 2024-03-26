@@ -27,6 +27,8 @@
   --selection-fill-color: #8398e64d;
   --overview-timeline-non-visible-color: #c8c8c8cc;
   --details-content-height: 280px;
+  --collapsed-background: hsla(190, 49%, 97%, 1);
+  --expanded-background: hsl(215, 22%, 19%);
 }
 
 @mixin transition($time: 0.1s) {
@@ -187,10 +189,6 @@ button.close {
   }
 }
 
-.query-table-container {
-  width: 100%;
-}
-
 @mixin table-font-size {
   font-size: 14px;
   line-height: 18px;
@@ -223,7 +221,8 @@ $bottom-tab-padding: 10px;
   }
 
   td {
-    padding: 2px 1px;
+    padding: 3px 5px;
+    white-space: nowrap;
 
     i.material-icons {
       // Shrink the icons inside the table cells to increase the information
@@ -265,8 +264,17 @@ $bottom-tab-padding: 10px;
   }
 }
 
-.query-table {
-  width: 100%;
+.pf-query-panel {
+  display: contents;
+  .pf-query-warning {
+    padding: 4px;
+    position: sticky;
+    left: 0;
+  }
+}
+
+.pf-query-table {
+  min-width: 100%;
   font-size: 14px;
   border: 0;
   thead td {
@@ -299,6 +307,11 @@ $bottom-tab-padding: 10px;
     }
     &[clickable] {
       cursor: pointer;
+      &:active {
+        background-color: hsl(206, 19%, 75%);
+        box-shadow: inset 1px 1px 4px #00000040;
+        transition: none;
+      }
     }
   }
 }
@@ -306,8 +319,10 @@ $bottom-tab-padding: 10px;
 .query-error {
   padding: 20px 10px;
   color: hsl(-10, 50%, 50%);
-  font-family: "Roboto Condensed", sans-serif;
+  font-family: "Roboto Mono", sans-serif;
+  font-size: 12px;
   font-weight: 300;
+  white-space: pre;
 }
 
 .dropdown {
@@ -460,7 +475,7 @@ $bottom-tab-padding: 10px;
 .scrolling-panel-container {
   position: relative;
   overflow-x: hidden;
-  overflow-y: scroll; // Always show vertical scrollbar
+  overflow-y: auto;
   flex: 1 1 auto;
   will-change: transform; // Force layer creation.
   display: grid;
@@ -471,17 +486,7 @@ $bottom-tab-padding: 10px;
 
 .details-panel-container {
   box-shadow: #0000003b 0px 0px 3px 1px;
-  position: relative;
-  overflow-x: hidden;
-  overflow-y: auto;
-  flex: 1 1 auto;
-  // TODO(hjd): This causes the sticky header to flicker when scrolling.
-  // Is will-change necessary in the details panel?
-  // will-change: transform;
-  display: grid;
-  grid-template-columns: 1fr;
-  grid-template-rows: 1fr;
-  grid-template-areas: "space";
+  overflow: auto;
 }
 
 .pinned-panel-container {
@@ -539,7 +544,7 @@ canvas.main-canvas {
 }
 
 .time-axis-panel {
-  height: 12px;
+  height: 22px;
 }
 
 .tickbar {
@@ -555,6 +560,9 @@ canvas.main-canvas {
 }
 
 header.overview {
+  position: sticky;
+  top: 0;
+  left: 0;
   display: flex;
   align-content: baseline;
   background-color: hsl(213, 22%, 82%);
@@ -657,9 +665,7 @@ button.query-ctrl {
 }
 
 .track-group-panel {
-  --collapsed-background: hsla(190, 49%, 97%, 1);
   --collapsed-transparent: hsla(190, 49%, 97%, 0);
-  --expanded-background: hsl(215, 22%, 19%);
   --expanded-transparent: hsl(215, 22%, 19%, 0);
   display: grid;
   grid-template-columns: auto 1fr;

@@ -24,7 +24,7 @@ namespace perfetto {
 namespace trace_processor {
 namespace {
 
-std::array<FtraceMessageDescriptor, 484> descriptors{{
+std::array<FtraceMessageDescriptor, 488> descriptors{{
     {nullptr, 0, {}},
     {nullptr, 0, {}},
     {nullptr, 0, {}},
@@ -5321,6 +5321,58 @@ std::array<FtraceMessageDescriptor, 484> descriptors{{
             {"kctx_tgid", ProtoSchemaType::kInt32},
             {"kctx_id", ProtoSchemaType::kUint32},
             {"info_val", ProtoSchemaType::kUint64},
+        },
+    },
+    {
+        "samsung_tracing_mark_write",
+        5,
+        {
+            {},
+            {"pid", ProtoSchemaType::kInt32},
+            {"trace_name", ProtoSchemaType::kString},
+            {"trace_begin", ProtoSchemaType::kUint32},
+            {"trace_type", ProtoSchemaType::kUint32},
+            {"value", ProtoSchemaType::kInt32},
+        },
+    },
+    {
+        "binder_command",
+        1,
+        {
+            {},
+            {"cmd", ProtoSchemaType::kUint32},
+        },
+    },
+    {
+        "binder_return",
+        1,
+        {
+            {},
+            {"cmd", ProtoSchemaType::kUint32},
+        },
+    },
+    {
+        "sched_switch_with_ctrs",
+        17,
+        {
+            {},
+            {"old_pid", ProtoSchemaType::kInt32},
+            {"new_pid", ProtoSchemaType::kInt32},
+            {"cctr", ProtoSchemaType::kUint32},
+            {"ctr0", ProtoSchemaType::kUint32},
+            {"ctr1", ProtoSchemaType::kUint32},
+            {"ctr2", ProtoSchemaType::kUint32},
+            {"ctr3", ProtoSchemaType::kUint32},
+            {"lctr0", ProtoSchemaType::kUint32},
+            {"lctr1", ProtoSchemaType::kUint32},
+            {"ctr4", ProtoSchemaType::kUint32},
+            {"ctr5", ProtoSchemaType::kUint32},
+            {"prev_comm", ProtoSchemaType::kString},
+            {"prev_pid", ProtoSchemaType::kInt32},
+            {"cyc", ProtoSchemaType::kUint32},
+            {"inst", ProtoSchemaType::kUint32},
+            {"stallbm", ProtoSchemaType::kUint32},
+            {"l3dm", ProtoSchemaType::kUint32},
         },
     },
 }};

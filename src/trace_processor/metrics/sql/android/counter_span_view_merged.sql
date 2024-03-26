@@ -14,7 +14,7 @@
 -- limitations under the License.
 --
 
--- Creates a span view for counters that may be global or associated with a 
+-- Creates a span view for counters that may be global or associated with a
 -- process, assuming that in the latter case we don't actually care about the
 -- process (probably because it's always system_server). We may want to erase
 -- this distinction for example when merging system properties and atrace
@@ -24,7 +24,7 @@
 -- identical values.
 
 DROP VIEW IF EXISTS {{table_name}}_span;
-CREATE VIEW {{table_name}}_span AS
+CREATE PERFETTO VIEW {{table_name}}_span AS
 SELECT
   ts,
   LEAD(ts, 1, (SELECT end_ts + 1 FROM trace_bounds))

@@ -20,15 +20,21 @@
 #include <stdint.h>
 
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "perfetto/base/logging.h"
+#include "perfetto/base/status.h"
+#include "src/trace_processor/containers/row_map.h"
 #include "src/trace_processor/containers/string_pool.h"
 #include "src/trace_processor/db/column.h"
 #include "src/trace_processor/db/column_storage_overlay.h"
+#include "src/trace_processor/db/query_executor.h"
 #include "src/trace_processor/db/typed_column.h"
+#include "src/trace_processor/util/status_macros.h"
 
 namespace perfetto {
 namespace trace_processor {
@@ -91,6 +97,8 @@ class Table {
     std::vector<Column> columns;
   };
 
+  static bool kUseFilterV2;
+
   Table();
   virtual ~Table();
 
@@ -115,6 +123,13 @@ class Table {
   RowMap FilterToRowMap(
       const std::vector<Constraint>& cs,
       RowMap::OptimizeFor optimize_for = RowMap::OptimizeFor::kMemory) const {
+    if (kUseFilterV2) {
+      if (optimize_for == RowMap::OptimizeFor::kMemory) {
+        return QueryExecutor::FilterLegacy(this, cs);
+      }
+      return RowMap(QueryExecutor::FilterLegacy(this, cs).TakeAsIndexVector());
+    }
+
     RowMap rm(0, row_count_, optimize_for);
     for (const Constraint& c : cs) {
       columns_[c.col_idx].FilterInto(c.op, c.value, &rm);

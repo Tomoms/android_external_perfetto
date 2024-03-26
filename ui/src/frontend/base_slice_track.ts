@@ -12,28 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import {Disposable, NullDisposable} from '../base/disposable';
 import {assertExists} from '../base/logging';
+import {clamp, floatEqual} from '../base/math_utils';
+import {
+  duration,
+  Time,
+  time,
+} from '../base/time';
 import {Actions} from '../common/actions';
-import {cropText, drawIncompleteSlice} from '../common/canvas_utils';
 import {
-  colorCompare,
-  colorToStr,
-  UNEXPECTED_PINK_COLOR,
-} from '../common/colorizer';
-import {NUM} from '../common/query_result';
+  cropText,
+  drawIncompleteSlice,
+  drawTrackHoverTooltip,
+} from '../common/canvas_utils';
+import {colorCompare} from '../common/color';
+import {UNEXPECTED_PINK} from '../common/colorizer';
 import {Selection, SelectionKind} from '../common/state';
-import {
-  fromNs,
-  tpDurationFromNanos,
-  TPTime,
-  tpTimeFromNanos,
-} from '../common/time';
+import {featureFlags} from '../core/feature_flags';
+import {raf} from '../core/raf_scheduler';
+import {Slice, SliceRect} from '../public';
+import {LONG, NUM} from '../trace_processor/query_result';
 
 import {checkerboardExcept} from './checkerboard';
 import {globals} from './globals';
-import {Slice} from './slice';
+import {PanelSize} from './panel';
 import {DEFAULT_SLICE_LAYOUT, SliceLayout} from './slice_layout';
-import {NewTrackArgs, SliceRect, Track} from './track';
+import {constraintsToQuerySuffix} from './sql_utils';
+import {NewTrackArgs, TrackBase} from './track';
 import {BUCKETS_PER_PIXEL, CacheKey, TrackCache} from './track_cache';
 
 // The common class that underpins all tracks drawing slices.
@@ -45,15 +51,23 @@ export const SLICE_FLAGS_INSTANT = 2;
 const SLICE_MIN_WIDTH_FOR_TEXT_PX = 5;
 const SLICE_MIN_WIDTH_PX = 1 / BUCKETS_PER_PIXEL;
 const CHEVRON_WIDTH_PX = 10;
-const DEFAULT_SLICE_COLOR = UNEXPECTED_PINK_COLOR;
+const DEFAULT_SLICE_COLOR = UNEXPECTED_PINK;
+const INCOMPLETE_SLICE_WIDTH_PX = 20;
+
+export const CROP_INCOMPLETE_SLICE_FLAG = featureFlags.register({
+  id: 'cropIncompleteSlice',
+  name: 'Crop incomplete Slice',
+  description: 'Display incomplete slice in short form',
+  defaultValue: false,
+});
 
 // Exposed and standalone to allow for testing without making this
 // visible to subclasses.
 function filterVisibleSlices<S extends Slice>(
-    slices: S[], start: TPTime, end: TPTime): S[] {
+    slices: S[], start: time, end: time): S[] {
   // Here we aim to reduce the number of slices we have to draw
   // by ignoring those that are not visible. A slice is visible iff:
-  //   slice.start + slice.duration >= start && slice.start <= end
+  //   slice.endNsQ >= start && slice.startNsQ <= end
   // It's allowable to include slices which aren't visible but we
   // must not exclude visible slices.
   // We could filter this.slices using this condition but since most
@@ -68,8 +82,8 @@ function filterVisibleSlices<S extends Slice>(
 
   // We do not need to handle non-ending slices (where dur = -1
   // but the slice is drawn as 'infinite' length) as this is handled
-  // by a special code path.
-  // TODO(hjd): Implement special code path.
+  // by a special code path. See 'incomplete' in the INITIALIZING
+  // code of maybeRequestData.
 
   // While the slices are guaranteed to be ordered by timestamp we must
   // consider async slices (which are not perfectly nested). This is to
@@ -91,16 +105,17 @@ function filterVisibleSlices<S extends Slice>(
   // that slice.start <= end.
 
   // One specific edge case that will come up often is when:
-  // For all slice in slices: slice.startS > endS (e.g. all slices are to the
-  // right). Since the slices are sorted by startS we can check this easily:
+  // For all slice in slices: slice.startNsQ > end (e.g. all slices are
+  // to the right).
+  // Since the slices are sorted by startS we can check this easily:
   const maybeFirstSlice: S|undefined = slices[0];
-  if (maybeFirstSlice && maybeFirstSlice.start > end) {
+  if (maybeFirstSlice && maybeFirstSlice.startNsQ > end) {
     return [];
   }
   // It's not possible to easily check the analogous edge case where all slices
   // are to the left:
-  // For all slice in slices: slice.startS + slice.durationS < startS
-  // as the slices are not ordered by 'endS'.
+  // For all slice in slices: slice.endNsQ < startS
+  // as the slices are not ordered by 'endNsQ'.
 
   // As described above you could do some clever binary search combined with
   // iteration however that seems quite complicated and error prone so instead
@@ -113,15 +128,13 @@ function filterVisibleSlices<S extends Slice>(
   let endIdx = slices.length;
   for (; startIdx < endIdx; ++startIdx) {
     const slice = slices[startIdx];
-    const sliceEndS = slice.start + slice.duration;
-    if (sliceEndS >= start && slice.start <= end) {
+    if (slice.endNsQ >= start && slice.startNsQ <= end) {
       break;
     }
   }
   for (; startIdx < endIdx; --endIdx) {
     const slice = slices[endIdx - 1];
-    const sliceEndS = slice.start + slice.duration;
-    if (sliceEndS >= start && slice.start <= end) {
+    if (slice.endNsQ >= start && slice.startNsQ <= end) {
       break;
     }
   }
@@ -137,16 +150,18 @@ export const filterVisibleSlicesForTesting = filterVisibleSlices;
 //   slices at depth 0..N.
 // If you need temporally overlapping slices, look at AsyncSliceTrack, which
 // merges several tracks into one visual track.
-export const BASE_SLICE_ROW = {
-  id: NUM,      // The slice ID, for selection / lookups.
-  tsq: NUM,     // Quantized |ts|. This class owns the quantization logic.
-  tsqEnd: NUM,  // Quantized |ts+dur|. The end bucket.
-  ts: NUM,      // Start time in nanoseconds.
-  dur: NUM,     // Duration in nanoseconds. -1 = incomplete, 0 = instant.
-  depth: NUM,   // Vertical depth.
+export const BASE_ROW = {
+  id: NUM,     // The slice ID, for selection / lookups.
+  ts: LONG,    // Start time in nanoseconds.
+  dur: LONG,   // Duration in nanoseconds. -1 = incomplete, 0 = instant.
+  depth: NUM,  // Vertical depth.
+
+  // These are computed by the base class:
+  tsq: LONG,     // Quantized |ts|. This class owns the quantization logic.
+  tsqEnd: LONG,  // Quantized |ts+dur|. The end bucket.
 };
 
-export type BaseSliceRow = typeof BASE_SLICE_ROW;
+export type BaseRow = typeof BASE_ROW;
 
 // These properties change @ 60FPS and shouldn't be touched by the subclass.
 // since the Impl doesn't see every frame attempting to reason on them in a
@@ -167,13 +182,11 @@ type CastInternal<S extends Slice> = S&SliceInternal;
 // Derived classes can extend this interface to override these types if needed.
 export interface BaseSliceTrackTypes {
   slice: Slice;
-  row: BaseSliceRow;
-  config: {};
+  row: BaseRow;
 }
 
-export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
-                                                   BaseSliceTrackTypes> extends
-    Track<T['config']> {
+export abstract class BaseSliceTrack<
+    T extends BaseSliceTrackTypes = BaseSliceTrackTypes> extends TrackBase {
   protected sliceLayout: SliceLayout = {...DEFAULT_SLICE_LAYOUT};
 
   // This is the over-skirted cached bounds:
@@ -186,8 +199,19 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
   private cache: TrackCache<Array<CastInternal<T['slice']>>> =
       new TrackCache(5);
 
-  protected readonly tableName: string;
-  private maxDurNs = 0;
+  // Incomplete slices (dur = -1). Rather than adding a lot of logic to
+  // the SQL queries to handle this case we materialise them one off
+  // then unconditionally render them. This should be efficient since
+  // there are at most |depth| slices.
+  private incomplete = new Array<CastInternal<T['slice']>>();
+
+  // The currently selected slice.
+  // TODO(hjd): We should fetch this from the underlying data rather
+  // than just remembering it when we see it.
+  private selectedSlice?: CastInternal<T['slice']>;
+
+  private maxDurNs: duration = 0n;
+
   private sqlState: 'UNINITIALIZED'|'INITIALIZING'|'QUERY_PENDING'|
       'QUERY_DONE' = 'UNINITIALIZED';
   private extraSqlColumns: string[];
@@ -209,13 +233,32 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
   // TODO(hjd): Replace once we have cancellable query sequences.
   private isDestroyed = false;
 
+  // Cleanup hook for onInit.
+  private initState?: Disposable;
+
   // Extension points.
   // Each extension point should take a dedicated argument type (e.g.,
   // OnSliceOverArgs {slice?: T['slice']}) so it makes future extensions
   // non-API-breaking (e.g. if we want to add the X position).
-  abstract initSqlTable(_tableName: string): Promise<void>;
+
+  // onInit hook lets you do asynchronous set up e.g. creating a table
+  // etc. We guarantee that this will be resolved before doing any
+  // queries using the result of getSqlSource(). All persistent
+  // state in trace_processor should be cleaned up when dispose is
+  // called on the returned hook. In the common case of where
+  // the data for this track is d
+  async onInit(): Promise<Disposable> {
+    return new NullDisposable();
+  }
+
+  // This should be an SQL expression returning all the columns listed
+  // metioned by getRowSpec() exluding tsq and tsqEnd.
+  // For example you might return an SQL expression of the form:
+  // `select id, ts, dur, 0 as depth from foo where bar = 'baz'`
+  abstract getSqlSource(): string;
+
   getRowSpec(): T['row'] {
-    return BASE_SLICE_ROW;
+    return BASE_ROW;
   }
   onSliceOver(_args: OnSliceOverArgs<T['slice']>): void {}
   onSliceOut(_args: OnSliceOutArgs<T['slice']>): void {}
@@ -238,16 +281,11 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
 
   constructor(args: NewTrackArgs) {
     super(args);
-    this.frontendOnly = true;  // Disable auto checkerboarding.
-    // TODO(hjd): Handle pinned tracks, which current cause a crash
-    // since the tableName we generate is the same for both.
-    this.tableName = `track_${this.trackId}`.replace(/[^a-zA-Z0-9_]+/g, '_');
-
     // Work out the extra columns.
     // This is the union of the embedder-defined columns and the base columns
     // we know about (ts, dur, ...).
     const allCols = Object.keys(this.getRowSpec());
-    const baseCols = Object.keys(BASE_SLICE_ROW);
+    const baseCols = Object.keys(BASE_ROW);
     this.extraSqlColumns = allCols.filter((key) => !baseCols.includes(key));
   }
 
@@ -262,6 +300,10 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
   onFullRedraw(): void {
     // Give a chance to the embedder to change colors and other stuff.
     this.onUpdatedSlices(this.slices);
+    this.onUpdatedSlices(this.incomplete);
+    if (this.selectedSlice !== undefined) {
+      this.onUpdatedSlices([this.selectedSlice]);
+    }
   }
 
   protected isSelectionHandled(selection: Selection): boolean {
@@ -274,19 +316,28 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     return supportedSelectionKinds.includes(selection.kind);
   }
 
-  renderCanvas(ctx: CanvasRenderingContext2D): void {
+  private getTitleFont(): string {
+    const size = this.sliceLayout.titleSizePx ?? 12;
+    return `${size}px Roboto Condensed`;
+  }
+
+  private getSubtitleFont(): string {
+    const size = this.sliceLayout.subtitleSizePx ?? 8;
+    return `${size}px Roboto Condensed`;
+  }
+
+  renderCanvas(ctx: CanvasRenderingContext2D, size: PanelSize): void {
     // TODO(hjd): fonts and colors should come from the CSS and not hardcoded
     // here.
     const {
       visibleTimeScale: timeScale,
       visibleWindowTime: vizTime,
-    } = globals.frontendLocalState;
+    } = globals.timeline;
 
     {
       const windowSizePx = Math.max(1, timeScale.pxSpan.delta);
-      // TODO(stevegolton): Keep these guys as bigints
-      const rawStartNs = vizTime.start.nanos;
-      const rawEndNs = vizTime.end.nanos;
+      const rawStartNs = vizTime.start.toTime();
+      const rawEndNs = vizTime.end.toTime();
       const rawSlicesKey = CacheKey.create(rawStartNs, rawEndNs, windowSizePx);
 
       // If the visible time range is outside the cached area, requests
@@ -299,7 +350,7 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     let charWidth = this.charWidth;
     if (charWidth < 0) {
       // TODO(hjd): Centralize font measurement/invalidation.
-      ctx.font = '12px Roboto Condensed';
+      ctx.font = this.getTitleFont();
       charWidth = this.charWidth = ctx.measureText('dbpqaouk').width / 8;
     }
 
@@ -307,25 +358,27 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     // needed because maybeRequestData() over-fetches to handle small pan/zooms.
     // We don't want to waste time drawing slices that are off screen.
     const vizSlices = this.getVisibleSlicesInternal(
-        vizTime.start.toTPTime('floor'), vizTime.end.toTPTime('ceil'));
+        vizTime.start.toTime('floor'), vizTime.end.toTime('ceil'));
 
     let selection = globals.state.currentSelection;
-
     if (!selection || !this.isSelectionHandled(selection)) {
       selection = null;
     }
+    const selectedId = selection ? (selection as {id: number}).id : undefined;
+    if (selectedId === undefined) {
+      this.selectedSlice = undefined;
+    }
+    let discoveredSelection: CastInternal<T['slice']>|undefined;
 
     // Believe it or not, doing 4xO(N) passes is ~2x faster than trying to draw
     // everything in one go. The key is that state changes operations on the
     // canvas (e.g., color, fonts) dominate any number crunching we do in JS.
 
-    this.updateSliceAndTrackHeight();
     const sliceHeight = this.computedSliceHeight;
     const padding = this.sliceLayout.padding;
     const rowSpacing = this.computedRowSpacing;
 
     // First pass: compute geometry of slices.
-    let selSlice: CastInternal<T['slice']>|undefined;
 
     // pxEnd is the last visible pixel in the visible viewport. Drawing
     // anything < 0 or > pxEnd doesn't produce any visible effect as it goes
@@ -337,13 +390,25 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
       // partially visible. This might end up with a negative x if the
       // slice starts before the visible time or with a width that overflows
       // pxEnd.
-      slice.x = timeScale.tpTimeToPx(slice.start);
-      slice.w = timeScale.durationToPx(slice.duration);
+      slice.x = timeScale.timeToPx(slice.startNsQ);
+      slice.w = timeScale.durationToPx(slice.durNsQ);
+
       if (slice.flags & SLICE_FLAGS_INSTANT) {
         // In the case of an instant slice, set the slice geometry on the
         // bounding box that will contain the chevron.
         slice.x -= CHEVRON_WIDTH_PX / 2;
         slice.w = CHEVRON_WIDTH_PX;
+      } else if (slice.flags & SLICE_FLAGS_INCOMPLETE) {
+        let widthPx;
+        if (CROP_INCOMPLETE_SLICE_FLAG.get()) {
+          widthPx = slice.x > 0 ? Math.min(pxEnd, INCOMPLETE_SLICE_WIDTH_PX) :
+              Math.max(0, INCOMPLETE_SLICE_WIDTH_PX + slice.x);
+          slice.x = Math.max(slice.x, 0);
+        } else {
+          slice.x = Math.max(slice.x, 0);
+          widthPx = pxEnd - slice.x;
+        }
+        slice.w = widthPx;
       } else {
         // If the slice is an actual slice, intersect the slice geometry with
         // the visible viewport (this affects only the first and last slice).
@@ -359,37 +424,70 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
         slice.w = sliceVizLimit - slice.x;
       }
 
-      if (selection && (selection as {id: number}).id === slice.id) {
-        selSlice = slice;
+      if (selectedId === slice.id) {
+        discoveredSelection = slice;
       }
     }
 
     // Second pass: fill slices by color.
-    // The .slice() turned out to be an unintended pun.
     const vizSlicesByColor = vizSlices.slice();
-    vizSlicesByColor.sort((a, b) => colorCompare(a.color, b.color));
+    vizSlicesByColor.sort(
+        (a, b) => colorCompare(a.colorScheme.base, b.colorScheme.base));
     let lastColor = undefined;
     for (const slice of vizSlicesByColor) {
-      if (slice.color !== lastColor) {
-        lastColor = slice.color;
-        ctx.fillStyle = colorToStr(slice.color);
+      const color = slice.isHighlighted ? slice.colorScheme.variant.cssString :
+                                          slice.colorScheme.base.cssString;
+      if (color !== lastColor) {
+        lastColor = color;
+        ctx.fillStyle = color;
       }
       const y = padding + slice.depth * (sliceHeight + rowSpacing);
       if (slice.flags & SLICE_FLAGS_INSTANT) {
         this.drawChevron(ctx, slice.x, y, sliceHeight);
       } else if (slice.flags & SLICE_FLAGS_INCOMPLETE) {
-        const w = Math.max(slice.w - 2, 2);
-        drawIncompleteSlice(ctx, slice.x, y, w, sliceHeight);
+        const w = CROP_INCOMPLETE_SLICE_FLAG.get() ? slice.w :
+                                                     Math.max(slice.w - 2, 2);
+        drawIncompleteSlice(
+            ctx, slice.x, y, w, sliceHeight, !CROP_INCOMPLETE_SLICE_FLAG.get());
       } else {
         const w = Math.max(slice.w, SLICE_MIN_WIDTH_PX);
         ctx.fillRect(slice.x, y, w, sliceHeight);
       }
     }
 
+    // Pass 2.5: Draw fillRatio light section.
+    ctx.fillStyle = `#FFFFFF50`;
+    for (const slice of vizSlicesByColor) {
+      // Can't draw fill ratio on incomplete or instant slices.
+      if (slice.flags & (SLICE_FLAGS_INCOMPLETE | SLICE_FLAGS_INSTANT)) {
+        continue;
+      }
+
+      // Clamp fillRatio between 0.0 -> 1.0
+      const fillRatio = clamp(slice.fillRatio, 0, 1);
+
+      // Don't draw anything if the fill ratio is 1.0ish
+      if (floatEqual(fillRatio, 1)) {
+        continue;
+      }
+
+      // Work out the width of the light section
+      const sliceDrawWidth = Math.max(slice.w, SLICE_MIN_WIDTH_PX);
+      const lightSectionDrawWidth = sliceDrawWidth * (1 - fillRatio);
+
+      // Don't draw anything if the light section is smaller than 1 px
+      if (lightSectionDrawWidth < 1) {
+        continue;
+      }
+
+      const y = padding + slice.depth * (sliceHeight + rowSpacing);
+      const x = slice.x + (sliceDrawWidth - lightSectionDrawWidth);
+      ctx.fillRect(x, y, lightSectionDrawWidth, sliceHeight);
+    }
+
     // Third pass, draw the titles (e.g., process name for sched slices).
-    ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
-    ctx.font = '12px Roboto Condensed';
+    ctx.font = this.getTitleFont();
     ctx.textBaseline = 'middle';
     for (const slice of vizSlices) {
       if ((slice.flags & SLICE_FLAGS_INSTANT) || !slice.title ||
@@ -397,17 +495,21 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
         continue;
       }
 
+      // Change the title color dynamically depending on contrast.
+      const textColor = slice.isHighlighted ? slice.colorScheme.textVariant :
+                                              slice.colorScheme.textBase;
+      ctx.fillStyle = textColor.cssString;
       const title = cropText(slice.title, charWidth, slice.w);
       const rectXCenter = slice.x + slice.w / 2;
       const y = padding + slice.depth * (sliceHeight + rowSpacing);
       const yDiv = slice.subTitle ? 3 : 2;
-      const yMidPoint = Math.floor(y + sliceHeight / yDiv) - 0.5;
+      const yMidPoint = Math.floor(y + sliceHeight / yDiv) + 0.5;
       ctx.fillText(title, rectXCenter, yMidPoint);
     }
 
     // Fourth pass, draw the subtitles (e.g., thread name for sched slices).
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.font = '10px Roboto Condensed';
+    ctx.font = this.getSubtitleFont();
     for (const slice of vizSlices) {
       if (slice.w < SLICE_MIN_WIDTH_FOR_TEXT_PX || !slice.subTitle ||
           (slice.flags & SLICE_FLAGS_INSTANT)) {
@@ -420,16 +522,22 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
       ctx.fillText(subTitle, rectXCenter, yMidPoint);
     }
 
-    // Draw a thicker border around the selected slice (or chevron).
-    if (selSlice !== undefined) {
-      const color = selSlice.color;
-      const y = padding + selSlice.depth * (sliceHeight + rowSpacing);
-      ctx.strokeStyle = `hsl(${color.h}, ${color.s}%, 30%)`;
+    // Here we need to ensure we never draw a slice that hasn't been
+    // updated via the math above so we don't use this.selectedSlice
+    // directly.
+    if (discoveredSelection !== undefined) {
+      this.selectedSlice = discoveredSelection;
+
+      // Draw a thicker border around the selected slice (or chevron).
+      const slice = discoveredSelection;
+      const color = slice.colorScheme;
+      const y = padding + slice.depth * (sliceHeight + rowSpacing);
+      ctx.strokeStyle = color.base.setHSL({s: 100, l: 10}).cssString;
       ctx.beginPath();
       const THICKNESS = 3;
       ctx.lineWidth = THICKNESS;
       ctx.strokeRect(
-          selSlice.x, y - THICKNESS / 2, selSlice.w, sliceHeight + THICKNESS);
+          slice.x, y - THICKNESS / 2, slice.w, sliceHeight + THICKNESS);
       ctx.closePath();
     }
 
@@ -438,25 +546,27 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     checkerboardExcept(
         ctx,
         this.getHeight(),
-        timeScale.hpTimeToPx(vizTime.start),
-        timeScale.hpTimeToPx(vizTime.end),
-        timeScale.secondsToPx(fromNs(this.slicesKey.startNs)),
-        timeScale.secondsToPx(fromNs(this.slicesKey.endNs)));
+        0,
+        size.width,
+        timeScale.timeToPx(this.slicesKey.start),
+        timeScale.timeToPx(this.slicesKey.end));
 
     // TODO(hjd): Remove this.
     // The only thing this does is drawing the sched latency arrow. We should
     // have some abstraction for that arrow (ideally the same we'd use for
     // flows).
-    this.drawSchedLatencyArrow(ctx, selSlice);
+    this.drawSchedLatencyArrow(ctx, this.selectedSlice);
 
     // If a slice is hovered, draw the tooltip.
     const tooltip = this.hoverTooltip;
+    const height = this.getHeight();
     if (this.hoveredSlice !== undefined && tooltip.length > 0 &&
         this.hoverPos !== undefined) {
       if (tooltip.length === 1) {
-        this.drawTrackHoverTooltip(ctx, this.hoverPos, tooltip[0]);
+        drawTrackHoverTooltip(ctx, this.hoverPos, height, tooltip[0]);
       } else {
-        this.drawTrackHoverTooltip(ctx, this.hoverPos, tooltip[0], tooltip[1]);
+        drawTrackHoverTooltip(
+            ctx, this.hoverPos, height, tooltip[0], tooltip[1]);
       }
     }  // if (hoveredSlice)
   }
@@ -464,7 +574,10 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
   onDestroy() {
     super.onDestroy();
     this.isDestroyed = true;
-    this.engine.query(`DROP VIEW IF EXISTS ${this.tableName}`);
+    if (this.initState) {
+      this.initState.dispose();
+      this.initState = undefined;
+    }
   }
 
   // This method figures out if the visible window is outside the bounds of
@@ -479,16 +592,59 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
       if (this.isDestroyed) {
         return;
       }
-      await this.initSqlTable(this.tableName);
+      this.initState = await this.onInit();
 
       if (this.isDestroyed) {
         return;
       }
       const queryRes = await this.engine.query(`select
           ifnull(max(dur), 0) as maxDur, count(1) as rowCount
-          from ${this.tableName}`);
-      const row = queryRes.firstRow({maxDur: NUM, rowCount: NUM});
+          from (${this.getSqlSource()})`);
+      const row = queryRes.firstRow({maxDur: LONG, rowCount: NUM});
       this.maxDurNs = row.maxDur;
+
+      // One off materialise the incomplete slices. The number of
+      // incomplete slices is smaller than the depth of the track and
+      // both are expected to be small.
+      if (this.isDestroyed) {
+        return;
+      }
+      {
+        // TODO(hjd): Consider case below:
+        // raw:
+        // 0123456789
+        //   [A     did not end)
+        //     [B ]
+        //
+        //
+        // quantised:
+        // 0123456789
+        //   [A     did not end)
+        // [     B  ]
+        // Does it lead to odd results?
+        const extraCols = this.extraSqlColumns.join(',');
+        const queryRes = await this.engine.query(`
+          select
+            ts as tsq,
+            ts as tsqEnd,
+            ts,
+            -1 as dur,
+            id,
+            ${this.depthColumn()}
+            ${extraCols ? ',' + extraCols : ''}
+          from (${this.getSqlSource()})
+          where dur = -1;
+        `);
+        const incomplete =
+            new Array<CastInternal<T['slice']>>(queryRes.numRows());
+        const it = queryRes.iter(this.getRowSpec());
+        for (let i = 0; it.valid(); it.next(), ++i) {
+          incomplete[i] = this.rowToSliceInternal(it);
+        }
+        this.onUpdatedSlices(incomplete);
+        this.incomplete = incomplete;
+      }
+
       this.sqlState = 'QUERY_DONE';
     } else if (
         this.sqlState === 'INITIALIZING' || this.sqlState === 'QUERY_PENDING') {
@@ -515,39 +671,39 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     }
 
     this.sqlState = 'QUERY_PENDING';
-    const bucketNs = slicesKey.bucketNs;
+    const bucketNs = slicesKey.bucketSize;
     let queryTsq;
     let queryTsqEnd;
     // When we're zoomed into the level of single ns there is no point
     // doing quantization (indeed it causes bad artifacts) so instead
     // we use ts / ts+dur directly.
-    if (bucketNs === 1) {
+    if (bucketNs === 1n) {
       queryTsq = 'ts';
       queryTsqEnd = 'ts + dur';
     } else {
-      queryTsq = `(ts + ${bucketNs / 2}) / ${bucketNs} * ${bucketNs}`;
-      queryTsqEnd = `(ts + dur + ${bucketNs / 2}) / ${bucketNs} * ${bucketNs}`;
+      queryTsq = `(ts + ${bucketNs / 2n}) / ${bucketNs} * ${bucketNs}`;
+      queryTsqEnd = `(ts + dur + ${bucketNs / 2n}) / ${bucketNs} * ${bucketNs}`;
     }
 
     const extraCols = this.extraSqlColumns.join(',');
-    let depthCol = 'depth';
-    let maybeGroupByDepth = 'depth, ';
-    const layout = this.sliceLayout;
-    const isFlat = (layout.maxDepth - layout.minDepth) <= 1;
-    // maxDepth === minDepth only makes sense if track is empty which on the
-    // one hand isn't very useful (and so maybe should be an error) on the
-    // other hand I can see it happening if someone does:
-    // minDepth = min(slices.depth); maxDepth = max(slices.depth);
-    // and slices is empty, so we treat that as flat.
-    if (isFlat) {
-      depthCol = `${this.sliceLayout.minDepth} as depth`;
-      maybeGroupByDepth = '';
-    }
+    const maybeDepth = this.isFlat() ? undefined : 'depth';
 
-    // TODO(hjd): Re-reason and improve this query:
-    // - Materialize the unfinished slices one off.
-    // - Avoid the union if we know we don't have any -1 slices.
-    // - Maybe we don't need the union at all and can deal in TS?
+    const constraint = constraintsToQuerySuffix({
+      filters: [
+        `ts >= ${slicesKey.start - this.maxDurNs}`,
+        `ts <= ${slicesKey.end}`,
+        `dur != -1`,
+      ],
+      groupBy: [
+        maybeDepth,
+        'tsq',
+      ],
+      orderBy: [
+        maybeDepth,
+        'tsq',
+      ],
+    });
+
     if (this.isDestroyed) {
       this.sqlState = 'QUERY_DONE';
       return;
@@ -555,38 +711,15 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     // TODO(hjd): Count and expose the number of slices summarized in
     // each bucket?
     const queryRes = await this.engine.query(`
-    with q1 as (
-      select
-        ${queryTsq} as tsq,
-        ${queryTsqEnd} as tsqEnd,
+      SELECT
+        ${queryTsq} AS tsq,
+        ${queryTsqEnd} AS tsqEnd,
         ts,
-        max(dur) as dur,
+        MAX(dur) AS dur,
         id,
-        ${depthCol}
+        ${this.depthColumn()}
         ${extraCols ? ',' + extraCols : ''}
-      from ${this.tableName}
-      where
-        ts >= ${slicesKey.startNs - this.maxDurNs /* - durNs */} and
-        ts <= ${slicesKey.endNs /* + durNs */}
-      group by ${maybeGroupByDepth} tsq
-      order by tsq),
-    q2 as (
-      select
-        ${queryTsq} as tsq,
-        ${queryTsqEnd} as tsqEnd,
-        ts,
-        -1 as dur,
-        id,
-        ${depthCol}
-        ${extraCols ? ',' + extraCols : ''}
-      from ${this.tableName}
-      where dur = -1
-      group by ${maybeGroupByDepth} tsq
-      )
-      select min(dur) as _unused, * from
-      (select * from q1 union all select * from q2)
-      group by ${maybeGroupByDepth} tsq
-      order by tsq
+      FROM (${this.getSqlSource()}) ${constraint}
     `);
 
     // Here convert each row to a Slice. We do what we can do
@@ -610,40 +743,54 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     this.slices = slices;
 
     this.sqlState = 'QUERY_DONE';
-    globals.rafScheduler.scheduleRedraw();
+    raf.scheduleRedraw();
   }
 
   private rowToSliceInternal(row: T['row']): CastInternal<T['slice']> {
     const slice = this.rowToSlice(row) as CastInternal<T['slice']>;
+
+    // If this is a more updated version of the selected slice throw
+    // away the old one.
+    if (this.selectedSlice?.id === slice.id) {
+      this.selectedSlice = undefined;
+    }
+
     slice.x = -1;
     slice.w = -1;
     return slice;
   }
 
   rowToSlice(row: T['row']): T['slice'] {
-    const startNsQ = row.tsq;
-    const endNsQ = row.tsqEnd;
+    const startNsQ = Time.fromRaw(row.tsq);
+    const endNsQ = Time.fromRaw(row.tsqEnd);
+    const ts = Time.fromRaw(row.ts);
+    const dur: duration = row.dur;
+
     let flags = 0;
-    if (row.dur === -1) {
+    if (row.dur === -1n) {
       flags |= SLICE_FLAGS_INCOMPLETE;
-    } else if (row.dur === 0) {
+    } else if (row.dur === 0n) {
       flags |= SLICE_FLAGS_INSTANT;
     }
 
     return {
       id: row.id,
-      start: tpTimeFromNanos(startNsQ),
-      duration: tpDurationFromNanos(endNsQ - startNsQ),
+      startNsQ,
+      endNsQ,
+      durNsQ: endNsQ - startNsQ,
+      ts,
+      dur,
       flags,
       depth: row.depth,
       title: '',
       subTitle: '',
+      fillRatio: 1,
 
       // The derived class doesn't need to initialize these. They are
       // rewritten on every renderCanvas() call. We just need to initialize
       // them to something.
-      baseColor: DEFAULT_SLICE_COLOR,
-      color: DEFAULT_SLICE_COLOR,
+      colorScheme: DEFAULT_SLICE_COLOR,
+      isHighlighted: false,
     };
   }
 
@@ -658,8 +805,9 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
       return undefined;
     }
 
+    const depth = Math.floor((y - padding) / (sliceHeight + rowSpacing));
+
     if (y >= padding && y <= trackHeight - padding) {
-      const depth = Math.floor((y - padding) / (sliceHeight + rowSpacing));
       for (const slice of this.slices) {
         if (slice.depth === depth && slice.x <= x && x <= slice.x + slice.w) {
           return slice;
@@ -667,7 +815,34 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
       }
     }
 
+    for (const slice of this.incomplete) {
+      const visibleTimeScale = globals.timeline.visibleTimeScale;
+      const startPx = CROP_INCOMPLETE_SLICE_FLAG.get() ?
+          visibleTimeScale.timeToPx(slice.startNsQ) :
+          slice.x;
+      const cropUnfinishedSlicesCondition = CROP_INCOMPLETE_SLICE_FLAG.get() ?
+        startPx + INCOMPLETE_SLICE_WIDTH_PX >= x : true;
+
+      if (slice.depth === depth && startPx <= x &&
+          cropUnfinishedSlicesCondition) {
+        return slice;
+      }
+    }
+
     return undefined;
+  }
+
+  private isFlat(): boolean {
+    // maxDepth and minDepth are a half open range so in the normal flat
+    // case maxDepth = 1 and minDepth = 0. In the non flat case:
+    // maxDepth = 42 and minDepth = 0. maxDepth === minDepth should not
+    // occur but is could happen if there are zero slices I guess so
+    // treat this as flat also.
+    return (this.sliceLayout.maxDepth - this.sliceLayout.minDepth) <= 1;
+  }
+
+  private depthColumn(): string {
+    return this.isFlat() ? `${this.sliceLayout.minDepth} as depth` : 'depth';
   }
 
   onMouseMove(position: {x: number, y: number}): void {
@@ -710,10 +885,16 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     return true;
   }
 
-  private getVisibleSlicesInternal(start: TPTime, end: TPTime):
+  private getVisibleSlicesInternal(start: time, end: time):
       Array<CastInternal<T['slice']>> {
-    return filterVisibleSlices<CastInternal<T['slice']>>(
-        this.slices, start, end);
+    let slices =
+        filterVisibleSlices<CastInternal<T['slice']>>(this.slices, start, end);
+    slices = slices.concat(this.incomplete);
+    // The selected slice is always visible:
+    if (this.selectedSlice && !this.slices.includes(this.selectedSlice)) {
+      slices.push(this.selectedSlice);
+    }
+    return slices;
   }
 
   private updateSliceAndTrackHeight() {
@@ -776,16 +957,7 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     for (const slice of slices) {
       const isHovering = globals.state.highlightedSliceId === slice.id ||
           (this.hoveredSlice && this.hoveredSlice.title === slice.title);
-      if (isHovering) {
-        slice.color = {
-          c: slice.baseColor.c,
-          h: slice.baseColor.h,
-          s: slice.baseColor.s,
-          l: 30,
-        };
-      } else {
-        slice.color = slice.baseColor;
-      }
+      slice.isHighlighted = !!isHovering;
     }
   }
 
@@ -794,10 +966,30 @@ export abstract class BaseSliceTrack<T extends BaseSliceTrackTypes =
     return this.computedTrackHeight;
   }
 
-  getSliceRect(_tStart: number, _tEnd: number, _depth: number): SliceRect
-      |undefined {
-    // TODO(hjd): Implement this as part of updating flow events.
-    return undefined;
+  getSliceRect(tStart: time, tEnd: time, depth: number): SliceRect|undefined {
+    this.updateSliceAndTrackHeight();
+
+    const {
+      windowSpan,
+      visibleTimeScale,
+      visibleTimeSpan,
+    } = globals.timeline;
+
+    const pxEnd = windowSpan.end;
+    const left = Math.max(visibleTimeScale.timeToPx(tStart), 0);
+    const right = Math.min(visibleTimeScale.timeToPx(tEnd), pxEnd);
+
+    const visible = visibleTimeSpan.intersects(tStart, tEnd);
+
+    const totalSliceHeight = this.computedRowSpacing + this.computedSliceHeight;
+
+    return {
+      left,
+      width: Math.max(right - left, 1),
+      top: this.sliceLayout.padding + depth * (totalSliceHeight),
+      height: this.computedSliceHeight,
+      visible,
+    };
   }
 }
 

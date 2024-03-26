@@ -13,14 +13,15 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 --
-SELECT IMPORT('android.battery');
+INCLUDE PERFETTO MODULE android.battery;
+INCLUDE PERFETTO MODULE android.battery_stats;
 
 DROP VIEW IF EXISTS battery_view;
-CREATE VIEW battery_view AS
+CREATE PERFETTO VIEW battery_view AS
 SELECT * FROM android_battery_charge;
 
 DROP TABLE IF EXISTS android_batt_wakelocks_merged;
-CREATE TABLE android_batt_wakelocks_merged AS
+CREATE PERFETTO TABLE android_batt_wakelocks_merged AS
 SELECT
   MIN(ts) AS ts,
   MAX(ts_end) AS ts_end
@@ -50,13 +51,13 @@ FROM (
 GROUP BY group_id;
 
 DROP VIEW IF EXISTS suspend_slice_from_minimal;
-CREATE VIEW suspend_slice_from_minimal AS
+CREATE PERFETTO VIEW suspend_slice_from_minimal AS
 SELECT ts, dur
 FROM track t JOIN slice s ON s.track_id = t.id
 WHERE t.name = 'Suspend/Resume Minimal';
 
 DROP TABLE IF EXISTS suspend_slice_;
-CREATE TABLE suspend_slice_ AS
+CREATE PERFETTO TABLE suspend_slice_ AS
 SELECT ts, dur FROM suspend_slice_from_minimal
 UNION ALL
 SELECT
@@ -100,7 +101,7 @@ CREATE VIRTUAL TABLE screen_state_span_with_suspend
 USING span_join(screen_state_span, suspend_slice_);
 
 DROP VIEW IF EXISTS android_batt_event;
-CREATE VIEW android_batt_event AS
+CREATE PERFETTO VIEW android_batt_event AS
 SELECT
   ts,
   dur,
@@ -182,10 +183,29 @@ SELECT ts,
        END AS slice_name,
        'Plug type' AS track_name,
        'slice' AS track_type
-FROM plug_type_span;
+FROM plug_type_span
+UNION ALL
+SELECT *
+FROM (
+  SELECT ts,
+         dur,
+         value_name AS slice_name,
+         CASE track_name
+         WHEN 'battery_stats.mobile_radio' THEN 'Cellular interface'
+         WHEN 'battery_stats.data_conn' THEN 'Cellular connection'
+         WHEN 'battery_stats.phone_signal_strength' THEN 'Cellular strength'
+         WHEN 'battery_stats.wifi_radio' THEN 'WiFi interface'
+         WHEN 'battery_stats.wifi_suppl' THEN 'Wifi supplicant state'
+         WHEN 'battery_stats.wifi_signal_strength' THEN 'WiFi strength'
+         ELSE NULL
+         END AS track_name,
+         'slice' AS track_type
+  FROM android_battery_stats_state
+)
+WHERE track_name IS NOT NULL;
 
 DROP VIEW IF EXISTS android_batt_output;
-CREATE VIEW android_batt_output AS
+CREATE PERFETTO VIEW android_batt_output AS
 SELECT AndroidBatteryMetric(
   'battery_counters', (
     SELECT RepeatedField(

@@ -59,7 +59,7 @@ std::string EventNameToProtoFieldName(const std::string& group,
   // These groups have events where the name alone conflicts with an existing
   // proto:
   if (group == "sde" || group == "g2d" || group == "dpu" || group == "mali" ||
-      group == "lwis") {
+      group == "lwis" || group == "samsung") {
     event_name = group + "_" + event_name;
   }
   return event_name;
@@ -223,8 +223,9 @@ void GenerateEventInfo(const std::vector<std::string>& events_info,
   s += std::string("// ") + __FILE__ + "\n";
   s += "// Do not edit.\n";
   s += R"(
-#include "perfetto/protozero/proto_utils.h"
 #include "src/traced/probes/ftrace/event_info.h"
+
+#include "perfetto/protozero/proto_utils.h"
 
 namespace perfetto {
 

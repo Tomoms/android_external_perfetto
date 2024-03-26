@@ -43,44 +43,56 @@
 #include "src/trace_processor/importers/json/json_trace_tokenizer.h"
 #include "src/trace_processor/importers/json/json_utils.h"
 #include "src/trace_processor/importers/ninja/ninja_log_parser.h"
+#include "src/trace_processor/importers/perf/perf_data_parser.h"
+#include "src/trace_processor/importers/perf/perf_data_tokenizer.h"
+#include "src/trace_processor/importers/perf/perf_data_tracker.h"
 #include "src/trace_processor/importers/proto/additional_modules.h"
 #include "src/trace_processor/importers/proto/content_analyzer.h"
 #include "src/trace_processor/importers/systrace/systrace_trace_parser.h"
 #include "src/trace_processor/iterator_impl.h"
-#include "src/trace_processor/prelude/functions/clock_functions.h"
-#include "src/trace_processor/prelude/functions/create_function.h"
-#include "src/trace_processor/prelude/functions/create_view_function.h"
-#include "src/trace_processor/prelude/functions/import.h"
-#include "src/trace_processor/prelude/functions/layout_functions.h"
-#include "src/trace_processor/prelude/functions/pprof_functions.h"
-#include "src/trace_processor/prelude/functions/sql_function.h"
-#include "src/trace_processor/prelude/functions/sqlite3_str_split.h"
-#include "src/trace_processor/prelude/functions/stack_functions.h"
-#include "src/trace_processor/prelude/functions/to_ftrace.h"
-#include "src/trace_processor/prelude/functions/utils.h"
-#include "src/trace_processor/prelude/functions/window_functions.h"
-#include "src/trace_processor/prelude/operators/span_join_operator.h"
-#include "src/trace_processor/prelude/operators/window_operator.h"
-#include "src/trace_processor/prelude/table_functions/ancestor.h"
-#include "src/trace_processor/prelude/table_functions/connected_flow.h"
-#include "src/trace_processor/prelude/table_functions/descendant.h"
-#include "src/trace_processor/prelude/table_functions/experimental_annotated_stack.h"
-#include "src/trace_processor/prelude/table_functions/experimental_counter_dur.h"
-#include "src/trace_processor/prelude/table_functions/experimental_flamegraph.h"
-#include "src/trace_processor/prelude/table_functions/experimental_flat_slice.h"
-#include "src/trace_processor/prelude/table_functions/experimental_sched_upid.h"
-#include "src/trace_processor/prelude/table_functions/experimental_slice_layout.h"
-#include "src/trace_processor/prelude/table_functions/table_function.h"
-#include "src/trace_processor/prelude/table_functions/view.h"
-#include "src/trace_processor/prelude/tables_views/tables_views.h"
+#include "src/trace_processor/metrics/metrics.h"
+#include "src/trace_processor/metrics/sql/amalgamated_sql_metrics.h"
+#include "src/trace_processor/perfetto_sql/engine/perfetto_sql_engine.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/clock_functions.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/create_function.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/create_view_function.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/layout_functions.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/math.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/pprof_functions.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/sql_function.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/sqlite3_str_split.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/stack_functions.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/to_ftrace.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/utils.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/functions/window_functions.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/operators/span_join_operator.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/operators/window_operator.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/ancestor.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/connected_flow.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/descendant.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/experimental_annotated_stack.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/experimental_counter_dur.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/experimental_flamegraph.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/experimental_flat_slice.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/experimental_sched_upid.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/experimental_slice_layout.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/static_table_function.h"
+#include "src/trace_processor/perfetto_sql/intrinsics/table_functions/view.h"
+#include "src/trace_processor/perfetto_sql/prelude/tables_views.h"
+#include "src/trace_processor/perfetto_sql/stdlib/stdlib.h"
 #include "src/trace_processor/sqlite/scoped_db.h"
+#include "src/trace_processor/sqlite/sql_source.h"
 #include "src/trace_processor/sqlite/sql_stats_table.h"
 #include "src/trace_processor/sqlite/sqlite_table.h"
 #include "src/trace_processor/sqlite/sqlite_utils.h"
 #include "src/trace_processor/sqlite/stats_table.h"
 #include "src/trace_processor/tp_metatrace.h"
+#include "src/trace_processor/types/trace_processor_context.h"
 #include "src/trace_processor/types/variadic.h"
+#include "src/trace_processor/util/descriptors.h"
+#include "src/trace_processor/util/protozero_to_json.h"
 #include "src/trace_processor/util/protozero_to_text.h"
+#include "src/trace_processor/util/regex.h"
 #include "src/trace_processor/util/sql_modules.h"
 #include "src/trace_processor/util/status_macros.h"
 
@@ -93,9 +105,6 @@
 #include "src/trace_processor/metrics/all_chrome_metrics.descriptor.h"
 #include "src/trace_processor/metrics/all_webview_metrics.descriptor.h"
 #include "src/trace_processor/metrics/metrics.descriptor.h"
-#include "src/trace_processor/metrics/metrics.h"
-#include "src/trace_processor/metrics/sql/amalgamated_sql_metrics.h"
-#include "src/trace_processor/stdlib/amalgamated_stdlib.h"
 
 namespace perfetto {
 namespace trace_processor {
@@ -106,15 +115,31 @@ const char kAllTablesQuery[] =
     "* FROM sqlite_temp_master)";
 
 template <typename SqlFunction, typename Ptr = typename SqlFunction::Context*>
-void RegisterFunction(SqliteEngine* engine,
+void RegisterFunction(PerfettoSqlEngine* engine,
                       const char* name,
                       int argc,
                       Ptr context = nullptr,
                       bool deterministic = true) {
-  auto status = engine->RegisterSqlFunction<SqlFunction>(
+  auto status = engine->RegisterStaticFunction<SqlFunction>(
       name, argc, std::move(context), deterministic);
   if (!status.ok())
     PERFETTO_ELOG("%s", status.c_message());
+}
+
+void RegisterAllProtoBuilderFunctions(DescriptorPool* pool,
+                                      PerfettoSqlEngine* engine,
+                                      TraceProcessor* tp) {
+  for (uint32_t i = 0; i < pool->descriptors().size(); ++i) {
+    // Convert the full name (e.g. .perfetto.protos.TraceMetrics.SubMetric)
+    // into a function name of the form (TraceMetrics_SubMetric).
+    const auto& desc = pool->descriptors()[i];
+    auto fn_name = desc.full_name().substr(desc.package_name().size() + 1);
+    std::replace(fn_name.begin(), fn_name.end(), '.', '_');
+    RegisterFunction<metrics::BuildProto>(
+        engine, fn_name.c_str(), -1,
+        std::unique_ptr<metrics::BuildProto::Context>(
+            new metrics::BuildProto::Context{tp, pool, i}));
+  }
 }
 
 void BuildBoundsTable(sqlite3* db, std::pair<int64_t, int64_t> bounds) {
@@ -228,63 +253,13 @@ std::vector<std::string> SanitizeMetricMountPaths(
     const std::vector<std::string>& mount_paths) {
   std::vector<std::string> sanitized;
   for (const auto& path : mount_paths) {
-    if (path.length() == 0)
+    if (path.empty())
       continue;
     sanitized.push_back(path);
     if (path.back() != '/')
       sanitized.back().append("/");
   }
   return sanitized;
-}
-
-void SetupMetrics(TraceProcessor* tp,
-                  SqliteEngine* engine,
-                  std::vector<metrics::SqlMetricFile>* sql_metrics,
-                  const std::vector<std::string>& extension_paths) {
-  const std::vector<std::string> sanitized_extension_paths =
-      SanitizeMetricMountPaths(extension_paths);
-  std::vector<std::string> skip_prefixes;
-  skip_prefixes.reserve(sanitized_extension_paths.size());
-  for (const auto& path : sanitized_extension_paths) {
-    skip_prefixes.push_back(kMetricProtoRoot + path);
-  }
-  tp->ExtendMetricsProto(kMetricsDescriptor.data(), kMetricsDescriptor.size(),
-                         skip_prefixes);
-  tp->ExtendMetricsProto(kAllChromeMetricsDescriptor.data(),
-                         kAllChromeMetricsDescriptor.size(), skip_prefixes);
-  tp->ExtendMetricsProto(kAllWebviewMetricsDescriptor.data(),
-                         kAllWebviewMetricsDescriptor.size(), skip_prefixes);
-
-  // TODO(lalitm): remove this special casing and change
-  // SanitizeMetricMountPaths if/when we move all protos for builtin metrics to
-  // match extension protos.
-  bool skip_all_sql = std::find(extension_paths.begin(), extension_paths.end(),
-                                "") != extension_paths.end();
-  if (!skip_all_sql) {
-    for (const auto& file_to_sql : sql_metrics::kFileToSql) {
-      if (base::StartsWithAny(file_to_sql.path, sanitized_extension_paths))
-        continue;
-      tp->RegisterMetric(file_to_sql.path, file_to_sql.sql);
-    }
-  }
-
-  RegisterFunction<metrics::NullIfEmpty>(engine, "NULL_IF_EMPTY", 1);
-  RegisterFunction<metrics::UnwrapMetricProto>(engine, "UNWRAP_METRIC_PROTO",
-                                               2);
-  RegisterFunction<metrics::RunMetric>(
-      engine, "RUN_METRIC", -1,
-      std::unique_ptr<metrics::RunMetric::Context>(
-          new metrics::RunMetric::Context{tp, sql_metrics}));
-
-  // TODO(lalitm): migrate this over to using RegisterFunction once aggregate
-  // functions are supported.
-  {
-    auto ret = sqlite3_create_function_v2(
-        engine->db(), "RepeatedField", 1, SQLITE_UTF8, nullptr, nullptr,
-        metrics::RepeatedFieldStep, metrics::RepeatedFieldFinal, nullptr);
-    if (ret)
-      PERFETTO_FATAL("Error initializing RepeatedField");
-  }
 }
 
 void InsertIntoTraceMetricsTable(sqlite3* db, const std::string& metric_name) {
@@ -297,137 +272,6 @@ void InsertIntoTraceMetricsTable(sqlite3* db, const std::string& metric_name) {
     PERFETTO_ELOG("Error registering table: %s", insert_error);
     sqlite3_free(insert_error);
   }
-}
-
-void IncrementCountForStmt(sqlite3_stmt* stmt,
-                           IteratorImpl::StmtMetadata* metadata) {
-  metadata->statement_count++;
-
-  // If the stmt is already done, it clearly didn't have any output.
-  if (sqlite_utils::IsStmtDone(stmt))
-    return;
-
-  if (sqlite3_column_count(stmt) == 1) {
-    sqlite3_value* value = sqlite3_column_value(stmt, 0);
-
-    // If the "VOID" pointer associated to the return value is not null,
-    // that means this is a function which is forced to return a value
-    // (because all functions in SQLite have to) but doesn't actually
-    // wait to (i.e. it wants to be treated like CREATE TABLE or similar).
-    // Because of this, ignore the return value of this function.
-    // See |WrapSqlFunction| for where this is set.
-    if (sqlite3_value_pointer(value, "VOID") != nullptr) {
-      return;
-    }
-
-    // If the statement only has a single column and that column is named
-    // "suppress_query_output", treat it as a statement without output for
-    // accounting purposes. This allows an escape hatch for cases where the
-    // user explicitly wants to ignore functions as having output.
-    if (strcmp(sqlite3_column_name(stmt, 0), "suppress_query_output") == 0) {
-      return;
-    }
-  }
-
-  // Otherwise, the statement has output and so increment the count.
-  metadata->statement_count_with_output++;
-}
-
-base::Status PrepareAndStepUntilLastValidStmt(
-    sqlite3* db,
-    const std::string& sql,
-    ScopedStmt* output_stmt,
-    IteratorImpl::StmtMetadata* metadata) {
-  ScopedStmt prev_stmt;
-  // A sql string can contain several statements. Some of them might be comment
-  // only, e.g. "SELECT 1; /* comment */; SELECT 2;". Here we process one
-  // statement on each iteration. SQLite's sqlite_prepare_v2 (wrapped by
-  // PrepareStmt) returns on each iteration a pointer to the unprocessed string.
-  //
-  // Unfortunately we cannot call PrepareStmt and tokenize all statements
-  // upfront because sqlite_prepare_v2 also semantically checks the statement
-  // against the schema. In some cases statements might depend on the execution
-  // of previous ones (e.e. CREATE VIEW x; SELECT FROM x; DELETE VIEW x;).
-  //
-  // Also, unfortunately, we need to PrepareStmt to find out if a statement is a
-  // comment or a real statement.
-  //
-  // The logic here is the following:
-  //  - We invoke PrepareStmt on each statement.
-  //  - If the statement is a comment we simply skip it.
-  //  - If the statement is valid, we step once to make sure side effects take
-  //    effect.
-  //  - If we encounter a valid statement afterwards, we step internally through
-  //    all rows of the previous one. This ensures that any further side effects
-  //    take hold *before* we step into the next statement.
-  //  - Once no further non-comment statements are encountered, we return an
-  //    iterator to the last valid statement.
-  for (const char* rem_sql = sql.c_str(); rem_sql && rem_sql[0];) {
-    ScopedStmt cur_stmt;
-    {
-      PERFETTO_TP_TRACE(metatrace::Category::QUERY, "QUERY_PREPARE");
-      const char* tail = nullptr;
-      RETURN_IF_ERROR(sqlite_utils::PrepareStmt(db, rem_sql, &cur_stmt, &tail));
-      rem_sql = tail;
-    }
-
-    // The only situation where we'd have an ok status but also no prepared
-    // statement is if the statement of SQL we parsed was a pure comment. In
-    // this case, just continue to the next statement.
-    if (!cur_stmt)
-      continue;
-
-    // Before stepping into |cur_stmt|, we need to finish iterating through
-    // the previous statement so we don't have two clashing statements (e.g.
-    // SELECT * FROM v and DROP VIEW v) partially stepped into.
-    if (prev_stmt) {
-      PERFETTO_TP_TRACE(metatrace::Category::QUERY, "STMT_STEP_UNTIL_DONE",
-                        [&prev_stmt](metatrace::Record* record) {
-                          auto expanded_sql =
-                              sqlite_utils::ExpandedSqlForStmt(*prev_stmt);
-                          record->AddArg("SQL", expanded_sql.get());
-                        });
-      RETURN_IF_ERROR(sqlite_utils::StepStmtUntilDone(prev_stmt.get()));
-    }
-
-    PERFETTO_DLOG("Executing statement: %s", sqlite3_sql(*cur_stmt));
-
-    {
-      PERFETTO_TP_TRACE(metatrace::Category::TOPLEVEL, "STMT_FIRST_STEP",
-                        [&cur_stmt](metatrace::Record* record) {
-                          auto expanded_sql =
-                              sqlite_utils::ExpandedSqlForStmt(*cur_stmt);
-                          record->AddArg("SQL", expanded_sql.get());
-                        });
-
-      // Now step once into |cur_stmt| so that when we prepare the next statment
-      // we will have executed any dependent bytecode in this one.
-      int err = sqlite3_step(*cur_stmt);
-      if (err != SQLITE_ROW && err != SQLITE_DONE) {
-        return base::ErrStatus(
-            "%s", sqlite_utils::FormatErrorMessage(
-                      prev_stmt.get(), base::StringView(sql), db, err)
-                      .c_message());
-      }
-    }
-
-    // Increment the neecessary counts for the statement.
-    IncrementCountForStmt(cur_stmt.get(), metadata);
-
-    // Propogate the current statement to the next iteration.
-    prev_stmt = std::move(cur_stmt);
-  }
-
-  // If we didn't manage to prepare a single statment, that means everything
-  // in the SQL was treated as a comment.
-  if (!prev_stmt)
-    return base::ErrStatus("No valid SQL to run");
-
-  // Update the output statment and column count.
-  *output_stmt = std::move(prev_stmt);
-  metadata->column_count =
-      static_cast<uint32_t>(sqlite3_column_count(output_stmt->get()));
-  return base::OkStatus();
 }
 
 const char* TraceTypeToString(TraceType trace_type) {
@@ -450,19 +294,16 @@ const char* TraceTypeToString(TraceType trace_type) {
       return "ninja_log";
     case kAndroidBugreportTraceType:
       return "android_bugreport";
+    case kPerfDataTraceType:
+      return "perf_data";
   }
   PERFETTO_FATAL("For GCC");
-}
-
-// Register SQL functions only used in local development instances.
-void RegisterDevFunctions(SqliteEngine* engine) {
-  RegisterFunction<WriteFile>(engine, "WRITE_FILE", 2);
 }
 
 sql_modules::NameToModule GetStdlibModules() {
   sql_modules::NameToModule modules;
   for (const auto& file_to_sql : stdlib::kFileToSql) {
-    std::string import_key = sql_modules::GetImportKey(file_to_sql.path);
+    std::string import_key = sql_modules::GetIncludeKey(file_to_sql.path);
     std::string module = sql_modules::GetModuleName(import_key);
     modules.Insert(module, {}).first->push_back({import_key, file_to_sql.sql});
   }
@@ -482,20 +323,15 @@ void InitializePreludeTablesViews(sqlite3* db) {
 
 }  // namespace
 
-template <typename View>
-void TraceProcessorImpl::RegisterView(const View& view) {
-  RegisterTableFunction(std::unique_ptr<TableFunction>(
-      new ViewTableFunction(&view, View::Name())));
-}
-
 TraceProcessorImpl::TraceProcessorImpl(const Config& cfg)
-    : TraceProcessorStorageImpl(cfg) {
+    : TraceProcessorStorageImpl(cfg), config_(cfg) {
   context_.fuchsia_trace_tokenizer.reset(new FuchsiaTraceTokenizer(&context_));
   context_.fuchsia_trace_parser.reset(new FuchsiaTraceParser(&context_));
-
   context_.ninja_log_parser.reset(new NinjaLogParser(&context_));
-
   context_.systrace_trace_parser.reset(new SystraceTraceParser(&context_));
+  context_.perf_data_trace_tokenizer.reset(
+      new perf_importer::PerfDataTokenizer(&context_));
+  context_.perf_data_parser.reset(new perf_importer::PerfDataParser(&context_));
 
   if (util::IsGzipSupported()) {
     context_.gzip_trace_parser.reset(new GzipTraceParser(&context_));
@@ -512,207 +348,49 @@ TraceProcessorImpl::TraceProcessorImpl(const Config& cfg)
     context_.content_analyzer.reset(new ProtoContentAnalyzer(&context_));
   }
 
-  sqlite3_str_split_init(engine_.db());
+  auto v2 = context_.config.dev_flags.find("enable_db2_filtering");
+  if (v2 != context_.config.dev_flags.end()) {
+    if (v2->second == "true") {
+      Table::kUseFilterV2 = true;
+    } else if (v2->second == "false") {
+      Table::kUseFilterV2 = false;
+    } else {
+      PERFETTO_ELOG("Unknown value for enable_db2_filtering %s",
+                    v2->second.c_str());
+    }
+  }
+
+  // Add metrics to descriptor pool
+  const std::vector<std::string> sanitized_extension_paths =
+      SanitizeMetricMountPaths(config_.skip_builtin_metric_paths);
+  std::vector<std::string> skip_prefixes;
+  skip_prefixes.reserve(sanitized_extension_paths.size());
+  for (const auto& path : sanitized_extension_paths) {
+    skip_prefixes.push_back(kMetricProtoRoot + path);
+  }
+  pool_.AddFromFileDescriptorSet(kMetricsDescriptor.data(),
+                                 kMetricsDescriptor.size(), skip_prefixes);
+  pool_.AddFromFileDescriptorSet(kAllChromeMetricsDescriptor.data(),
+                                 kAllChromeMetricsDescriptor.size(),
+                                 skip_prefixes);
+  pool_.AddFromFileDescriptorSet(kAllWebviewMetricsDescriptor.data(),
+                                 kAllWebviewMetricsDescriptor.size(),
+                                 skip_prefixes);
+
   RegisterAdditionalModules(&context_);
 
-  // New style function registration.
-  if (cfg.enable_dev_features) {
-    RegisterDevFunctions(&engine_);
+  InitPerfettoSqlEngine();
+
+  bool skip_all_sql = std::find(config_.skip_builtin_metric_paths.begin(),
+                                config_.skip_builtin_metric_paths.end(),
+                                "") != config_.skip_builtin_metric_paths.end();
+  if (!skip_all_sql) {
+    for (const auto& file_to_sql : sql_metrics::kFileToSql) {
+      if (base::StartsWithAny(file_to_sql.path, sanitized_extension_paths))
+        continue;
+      RegisterMetric(file_to_sql.path, file_to_sql.sql);
+    }
   }
-  RegisterFunction<Glob>(&engine_, "glob", 2);
-  RegisterFunction<Hash>(&engine_, "HASH", -1);
-  RegisterFunction<Base64Encode>(&engine_, "BASE64_ENCODE", 1);
-  RegisterFunction<Demangle>(&engine_, "DEMANGLE", 1);
-  RegisterFunction<SourceGeq>(&engine_, "SOURCE_GEQ", -1);
-  RegisterFunction<ExportJson>(&engine_, "EXPORT_JSON", 1,
-                               context_.storage.get(), false);
-  RegisterFunction<ExtractArg>(&engine_, "EXTRACT_ARG", 2,
-                               context_.storage.get());
-  RegisterFunction<AbsTimeStr>(&engine_, "ABS_TIME_STR", 1,
-                               context_.clock_converter.get());
-  RegisterFunction<ToMonotonic>(&engine_, "TO_MONOTONIC", 1,
-                                context_.clock_converter.get());
-  RegisterFunction<CreateFunction>(&engine_, "CREATE_FUNCTION", 3, &engine_);
-  RegisterFunction<CreateViewFunction>(
-      &engine_, "CREATE_VIEW_FUNCTION", 3,
-      std::unique_ptr<CreateViewFunction::Context>(
-          new CreateViewFunction::Context{engine_.db()}));
-  RegisterFunction<Import>(&engine_, "IMPORT", 1,
-                           std::unique_ptr<Import::Context>(new Import::Context{
-                               engine_.db(), this, &sql_modules_}));
-  RegisterFunction<ToFtrace>(
-      &engine_, "TO_FTRACE", 1,
-      std::unique_ptr<ToFtrace::Context>(new ToFtrace::Context{
-          context_.storage.get(), SystraceSerializer(&context_)}));
-
-  // Old style function registration.
-  // TODO(lalitm): migrate this over to using RegisterFunction once aggregate
-  // functions are supported.
-  RegisterLastNonNullFunction(engine_.db());
-  RegisterValueAtMaxTsFunction(engine_.db());
-  {
-    base::Status status = RegisterStackFunctions(&engine_, &context_);
-    if (!status.ok())
-      PERFETTO_ELOG("%s", status.c_message());
-  }
-  {
-    base::Status status = PprofFunctions::Register(engine_.db(), &context_);
-    if (!status.ok())
-      PERFETTO_ELOG("%s", status.c_message());
-  }
-  {
-    base::Status status = LayoutFunctions::Register(engine_.db(), &context_);
-    if (!status.ok())
-      PERFETTO_ELOG("%s", status.c_message());
-  }
-
-  const TraceStorage* storage = context_.storage.get();
-
-  // Operator tables.
-  engine_.RegisterVirtualTableModule<SpanJoinOperatorTable>(
-      "span_join", storage, SqliteTable::TableType::kExplicitCreate, false);
-  engine_.RegisterVirtualTableModule<SpanJoinOperatorTable>(
-      "span_left_join", storage, SqliteTable::TableType::kExplicitCreate,
-      false);
-  engine_.RegisterVirtualTableModule<SpanJoinOperatorTable>(
-      "span_outer_join", storage, SqliteTable::TableType::kExplicitCreate,
-      false);
-  engine_.RegisterVirtualTableModule<WindowOperatorTable>(
-      "window", storage, SqliteTable::TableType::kExplicitCreate, true);
-  RegisterCreateViewFunctionModule(&engine_);
-
-  // Initalize the tables and views in the prelude.
-  InitializePreludeTablesViews(engine_.db());
-
-  auto stdlib_modules = GetStdlibModules();
-  for (auto module_it = stdlib_modules.GetIterator(); module_it; ++module_it) {
-    base::Status status =
-        RegisterSqlModule({module_it.key(), module_it.value(), false});
-    if (!status.ok())
-      PERFETTO_ELOG("%s", status.c_message());
-  }
-
-  SetupMetrics(this, &engine_, &sql_metrics_, cfg.skip_builtin_metric_paths);
-
-  // Legacy tables.
-  engine_.RegisterVirtualTableModule<SqlStatsTable>(
-      "sqlstats", storage, SqliteTable::TableType::kEponymousOnly, false);
-  engine_.RegisterVirtualTableModule<StatsTable>(
-      "stats", storage, SqliteTable::TableType::kEponymousOnly, false);
-
-  // Tables dynamically generated at query time.
-  RegisterTableFunction(std::unique_ptr<ExperimentalFlamegraph>(
-      new ExperimentalFlamegraph(&context_)));
-  RegisterTableFunction(std::unique_ptr<ExperimentalCounterDur>(
-      new ExperimentalCounterDur(storage->counter_table())));
-  RegisterTableFunction(std::unique_ptr<ExperimentalSliceLayout>(
-      new ExperimentalSliceLayout(context_.storage.get()->mutable_string_pool(),
-                                  &storage->slice_table())));
-  RegisterTableFunction(std::unique_ptr<Ancestor>(
-      new Ancestor(Ancestor::Type::kSlice, context_.storage.get())));
-  RegisterTableFunction(std::unique_ptr<Ancestor>(new Ancestor(
-      Ancestor::Type::kStackProfileCallsite, context_.storage.get())));
-  RegisterTableFunction(std::unique_ptr<Ancestor>(
-      new Ancestor(Ancestor::Type::kSliceByStack, context_.storage.get())));
-  RegisterTableFunction(std::unique_ptr<Descendant>(
-      new Descendant(Descendant::Type::kSlice, context_.storage.get())));
-  RegisterTableFunction(std::unique_ptr<Descendant>(
-      new Descendant(Descendant::Type::kSliceByStack, context_.storage.get())));
-  RegisterTableFunction(std::unique_ptr<ConnectedFlow>(new ConnectedFlow(
-      ConnectedFlow::Mode::kDirectlyConnectedFlow, context_.storage.get())));
-  RegisterTableFunction(std::unique_ptr<ConnectedFlow>(new ConnectedFlow(
-      ConnectedFlow::Mode::kPrecedingFlow, context_.storage.get())));
-  RegisterTableFunction(std::unique_ptr<ConnectedFlow>(new ConnectedFlow(
-      ConnectedFlow::Mode::kFollowingFlow, context_.storage.get())));
-  RegisterTableFunction(
-      std::unique_ptr<ExperimentalSchedUpid>(new ExperimentalSchedUpid(
-          storage->sched_slice_table(), storage->thread_table())));
-  RegisterTableFunction(std::unique_ptr<ExperimentalAnnotatedStack>(
-      new ExperimentalAnnotatedStack(&context_)));
-  RegisterTableFunction(std::unique_ptr<ExperimentalFlatSlice>(
-      new ExperimentalFlatSlice(&context_)));
-
-  // Views.
-  RegisterView(storage->thread_slice_view());
-
-  // New style db-backed tables.
-  // Note: if adding a table here which might potentially contain many rows
-  // (O(rows in sched/slice/counter)), then consider calling ShrinkToFit on
-  // that table in TraceStorage::ShrinkToFitTables.
-  RegisterDbTable(storage->arg_table());
-  RegisterDbTable(storage->raw_table());
-  RegisterDbTable(storage->ftrace_event_table());
-  RegisterDbTable(storage->thread_table());
-  RegisterDbTable(storage->process_table());
-  RegisterDbTable(storage->filedescriptor_table());
-
-  RegisterDbTable(storage->slice_table());
-  RegisterDbTable(storage->flow_table());
-  RegisterDbTable(storage->slice_table());
-  RegisterDbTable(storage->sched_slice_table());
-  RegisterDbTable(storage->thread_state_table());
-  RegisterDbTable(storage->gpu_slice_table());
-
-  RegisterDbTable(storage->track_table());
-  RegisterDbTable(storage->thread_track_table());
-  RegisterDbTable(storage->process_track_table());
-  RegisterDbTable(storage->cpu_track_table());
-  RegisterDbTable(storage->gpu_track_table());
-
-  RegisterDbTable(storage->counter_table());
-
-  RegisterDbTable(storage->counter_track_table());
-  RegisterDbTable(storage->process_counter_track_table());
-  RegisterDbTable(storage->thread_counter_track_table());
-  RegisterDbTable(storage->cpu_counter_track_table());
-  RegisterDbTable(storage->irq_counter_track_table());
-  RegisterDbTable(storage->softirq_counter_track_table());
-  RegisterDbTable(storage->gpu_counter_track_table());
-  RegisterDbTable(storage->gpu_counter_group_table());
-  RegisterDbTable(storage->perf_counter_track_table());
-  RegisterDbTable(storage->energy_counter_track_table());
-  RegisterDbTable(storage->uid_counter_track_table());
-  RegisterDbTable(storage->energy_per_uid_counter_track_table());
-
-  RegisterDbTable(storage->heap_graph_object_table());
-  RegisterDbTable(storage->heap_graph_reference_table());
-  RegisterDbTable(storage->heap_graph_class_table());
-
-  RegisterDbTable(storage->symbol_table());
-  RegisterDbTable(storage->heap_profile_allocation_table());
-  RegisterDbTable(storage->cpu_profile_stack_sample_table());
-  RegisterDbTable(storage->perf_sample_table());
-  RegisterDbTable(storage->stack_profile_callsite_table());
-  RegisterDbTable(storage->stack_profile_mapping_table());
-  RegisterDbTable(storage->stack_profile_frame_table());
-  RegisterDbTable(storage->package_list_table());
-  RegisterDbTable(storage->profiler_smaps_table());
-
-  RegisterDbTable(storage->android_log_table());
-  RegisterDbTable(storage->android_dumpstate_table());
-  RegisterDbTable(storage->android_game_intervention_list_table());
-
-  RegisterDbTable(storage->vulkan_memory_allocations_table());
-
-  RegisterDbTable(storage->graphics_frame_slice_table());
-
-  RegisterDbTable(storage->expected_frame_timeline_slice_table());
-  RegisterDbTable(storage->actual_frame_timeline_slice_table());
-
-  RegisterDbTable(storage->metadata_table());
-  RegisterDbTable(storage->cpu_table());
-  RegisterDbTable(storage->cpu_freq_table());
-  RegisterDbTable(storage->clock_snapshot_table());
-
-  RegisterDbTable(storage->memory_snapshot_table());
-  RegisterDbTable(storage->process_memory_snapshot_table());
-  RegisterDbTable(storage->memory_snapshot_node_table());
-  RegisterDbTable(storage->memory_snapshot_edge_table());
-
-  RegisterDbTable(storage->experimental_proto_path_table());
-  RegisterDbTable(storage->experimental_proto_content_table());
-
-  RegisterDbTable(storage->experimental_missing_chrome_processes_table());
 }
 
 TraceProcessorImpl::~TraceProcessorImpl() = default;
@@ -743,7 +421,8 @@ void TraceProcessorImpl::Flush() {
       context_.storage->InternString(TraceTypeToString(context_.trace_type));
   context_.metadata_tracker->SetMetadata(metadata::trace_type,
                                          Variadic::String(trace_type_id));
-  BuildBoundsTable(engine_.db(), context_.storage->GetTraceTimestampBoundsNs());
+  BuildBoundsTable(engine_->sqlite_engine()->db(),
+                   context_.storage->GetTraceTimestampBoundsNs());
 }
 
 void TraceProcessorImpl::NotifyEndOfFile() {
@@ -781,67 +460,57 @@ void TraceProcessorImpl::NotifyEndOfFile() {
   // TraceProcessorStorageImpl::NotifyEndOfFile, this will be counted in
   // trace bounds: this is important for parsers like ninja which wait until
   // the end to flush all their data.
-  BuildBoundsTable(engine_.db(), context_.storage->GetTraceTimestampBoundsNs());
+  BuildBoundsTable(engine_->sqlite_engine()->db(),
+                   context_.storage->GetTraceTimestampBoundsNs());
 
   TraceProcessorStorageImpl::DestroyContext();
 }
 
 size_t TraceProcessorImpl::RestoreInitialTables() {
-  // Step 1: figure out what tables/views/indices we need to delete.
-  std::vector<std::pair<std::string, std::string>> deletion_list;
-  std::string msg = "Resetting DB to initial state, deleting table/views:";
+  // Get count of all registered tables/views/indices
+  uint64_t tables_views_in_sqlite_count_ = 0;
   for (auto it = ExecuteQuery(kAllTablesQuery); it.Next();) {
     std::string name(it.Get(0).string_value);
-    std::string type(it.Get(1).string_value);
     if (std::find(initial_tables_.begin(), initial_tables_.end(), name) ==
         initial_tables_.end()) {
-      msg += " " + name;
-      deletion_list.push_back(std::make_pair(type, name));
+      tables_views_in_sqlite_count_++;
     }
   }
+  PERFETTO_CHECK(tables_views_in_sqlite_count_ >=
+                 engine_->RuntimeTablesAndViewsCount());
 
-  PERFETTO_LOG("%s", msg.c_str());
-
-  // Step 2: actually delete those tables/views/indices.
-  for (const auto& tn : deletion_list) {
-    std::string query = "DROP " + tn.first + " " + tn.second;
-    auto it = ExecuteQuery(query);
-    while (it.Next()) {
-    }
-    // Index deletion can legitimately fail. If one creates an index "i" on a
-    // table "t" but issues the deletion in the order (t, i), the DROP index i
-    // will fail with "no such index" because deleting the table "t"
-    // automatically deletes all associated indexes.
-    if (!it.Status().ok() && tn.first != "index")
-      PERFETTO_FATAL("%s -> %s", query.c_str(), it.Status().c_message());
-  }
-  return deletion_list.size();
+  // Add the number of tables/views registered with SQLite to the number of
+  // "objects" (tables, views, functions etc) that we've registered and take
+  // away the number of "runtime" tables/views which are registered (which will
+  // be double counted).
+  uint64_t registered_count_before = tables_views_in_sqlite_count_ +
+                                     engine_->AllRegisteredObjectsCount() -
+                                     engine_->RuntimeTablesAndViewsCount();
+  InitPerfettoSqlEngine();
+  return static_cast<size_t>(registered_count_before -
+                             engine_->AllRegisteredObjectsCount());
 }
 
 Iterator TraceProcessorImpl::ExecuteQuery(const std::string& sql) {
-  PERFETTO_TP_TRACE(metatrace::Category::TOPLEVEL, "QUERY_EXECUTE");
+  PERFETTO_TP_TRACE(metatrace::Category::API_TIMELINE, "EXECUTE_QUERY");
 
   uint32_t sql_stats_row =
       context_.storage->mutable_sql_stats()->RecordQueryBegin(
           sql, base::GetWallTimeNs().count());
-
-  ScopedStmt stmt;
-  IteratorImpl::StmtMetadata metadata;
-  base::Status status =
-      PrepareAndStepUntilLastValidStmt(engine_.db(), sql, &stmt, &metadata);
-  PERFETTO_DCHECK((status.ok() && stmt) || (!status.ok() && !stmt));
-
+  std::string non_breaking_sql = base::ReplaceAll(sql, "\u00A0", " ");
+  base::StatusOr<PerfettoSqlEngine::ExecutionResult> result =
+      engine_->ExecuteUntilLastStatement(
+          SqlSource::FromExecuteQuery(std::move(non_breaking_sql)));
   std::unique_ptr<IteratorImpl> impl(
-      new IteratorImpl(this, engine_.db(), status, std::move(stmt),
-                       std::move(metadata), sql_stats_row));
+      new IteratorImpl(this, std::move(result), sql_stats_row));
   return Iterator(std::move(impl));
 }
 
 void TraceProcessorImpl::InterruptQuery() {
-  if (!engine_.db())
+  if (!engine_->sqlite_engine()->db())
     return;
   query_interrupted_.store(true);
-  sqlite3_interrupt(engine_.db());
+  sqlite3_interrupt(engine_->sqlite_engine()->db());
 }
 
 bool TraceProcessorImpl::IsRootMetricField(const std::string& metric_name) {
@@ -856,45 +525,39 @@ bool TraceProcessorImpl::IsRootMetricField(const std::string& metric_name) {
 base::Status TraceProcessorImpl::RegisterSqlModule(SqlModule sql_module) {
   sql_modules::RegisteredModule new_module;
   std::string name = sql_module.name;
-  if (sql_modules_.Find(name) && !sql_module.allow_module_override) {
+  if (engine_->FindModule(name) && !sql_module.allow_module_override) {
     return base::ErrStatus(
         "Module '%s' is already registered. Choose a different name.\n"
         "If you want to replace the existing module using trace processor "
-        "shell, you need to pass the --dev flag and use --override-sql-module "
+        "shell, you need to pass the --dev flag and use "
+        "--override-sql-module "
         "to pass the module path.",
         name.c_str());
   }
   for (auto const& name_and_sql : sql_module.files) {
     if (sql_modules::GetModuleName(name_and_sql.first) != name) {
       return base::ErrStatus(
-          "File import key doesn't match the module name. First part of import "
+          "File import key doesn't match the module name. First part of "
+          "import "
           "key should be module name. Import key: %s, module name: %s.",
           name_and_sql.first.c_str(), name.c_str());
     }
-    new_module.import_key_to_file.Insert(name_and_sql.first,
-                                         {name_and_sql.second, false});
+    new_module.include_key_to_file.Insert(name_and_sql.first,
+                                          {name_and_sql.second, false});
   }
-  sql_modules_.Insert(name, std::move(new_module));
+  engine_->RegisterModule(name, std::move(new_module));
   return base::OkStatus();
 }
 
 base::Status TraceProcessorImpl::RegisterMetric(const std::string& path,
                                                 const std::string& sql) {
-  std::string stripped_sql;
-  for (base::StringSplitter sp(sql, '\n'); sp.Next();) {
-    if (strncmp(sp.cur_token(), "--", 2) != 0) {
-      stripped_sql.append(sp.cur_token());
-      stripped_sql.push_back('\n');
-    }
-  }
-
   // Check if the metric with the given path already exists and if it does,
   // just update the SQL associated with it.
   auto it = std::find_if(
       sql_metrics_.begin(), sql_metrics_.end(),
       [&path](const metrics::SqlMetricFile& m) { return m.path == path; });
   if (it != sql_metrics_.end()) {
-    it->sql = stripped_sql;
+    it->sql = sql;
     return base::OkStatus();
   }
 
@@ -910,7 +573,7 @@ base::Status TraceProcessorImpl::RegisterMetric(const std::string& path,
 
   metrics::SqlMetricFile metric;
   metric.path = path;
-  metric.sql = stripped_sql;
+  metric.sql = sql;
 
   if (IsRootMetricField(no_ext_name)) {
     metric.proto_field_name = no_ext_name;
@@ -932,10 +595,12 @@ base::Status TraceProcessorImpl::RegisterMetric(const std::string& path,
           "and %s are both trying to output the proto field %s",
           prev_path.c_str(), path.c_str(), metric.proto_field_name->c_str());
     }
-
-    InsertIntoTraceMetricsTable(engine_.db(), no_ext_name);
   }
 
+  if (metric.proto_field_name) {
+    InsertIntoTraceMetricsTable(engine_->sqlite_engine()->db(),
+                                *metric.proto_field_name);
+  }
   sql_metrics_.emplace_back(metric);
   return base::OkStatus();
 }
@@ -949,22 +614,8 @@ base::Status TraceProcessorImpl::ExtendMetricsProto(
     const uint8_t* data,
     size_t size,
     const std::vector<std::string>& skip_prefixes) {
-  base::Status status =
-      pool_.AddFromFileDescriptorSet(data, size, skip_prefixes);
-  if (!status.ok())
-    return status;
-
-  for (uint32_t i = 0; i < pool_.descriptors().size(); ++i) {
-    // Convert the full name (e.g. .perfetto.protos.TraceMetrics.SubMetric)
-    // into a function name of the form (TraceMetrics_SubMetric).
-    const auto& desc = pool_.descriptors()[i];
-    auto fn_name = desc.full_name().substr(desc.package_name().size() + 1);
-    std::replace(fn_name.begin(), fn_name.end(), '.', '_');
-    RegisterFunction<metrics::BuildProto>(
-        &engine_, fn_name.c_str(), -1,
-        std::unique_ptr<metrics::BuildProto::Context>(
-            new metrics::BuildProto::Context{this, &pool_, i}));
-  }
+  RETURN_IF_ERROR(pool_.AddFromFileDescriptorSet(data, size, skip_prefixes));
+  RegisterAllProtoBuilderFunctions(&pool_, engine_.get(), this);
   return base::OkStatus();
 }
 
@@ -976,8 +627,8 @@ base::Status TraceProcessorImpl::ComputeMetric(
     return base::Status("Root metrics proto descriptor not found");
 
   const auto& root_descriptor = pool_.descriptors()[opt_idx.value()];
-  return metrics::ComputeMetrics(this, metric_names, sql_metrics_, pool_,
-                                 root_descriptor, metrics_proto);
+  return metrics::ComputeMetrics(engine_.get(), metric_names, sql_metrics_,
+                                 pool_, root_descriptor, metrics_proto);
 }
 
 base::Status TraceProcessorImpl::ComputeMetricText(
@@ -996,8 +647,11 @@ base::Status TraceProcessorImpl::ComputeMetricText(
           protozero_to_text::kIncludeNewLines);
       break;
     case TraceProcessor::MetricResultFormat::kJson:
-      // TODO(dproy): Implement this.
-      PERFETTO_FATAL("Json formatted metrics not supported yet.");
+      *metrics_string = protozero_to_json::ProtozeroToJson(
+          pool_, ".perfetto.protos.TraceMetrics",
+          protozero::ConstBytes{metrics_proto.data(), metrics_proto.size()},
+          protozero_to_json::kPretty | protozero_to_json::kInlineErrors |
+              protozero_to_json::kInlineAnnotations);
       break;
   }
   return status;
@@ -1009,6 +663,279 @@ std::vector<uint8_t> TraceProcessorImpl::GetMetricDescriptors() {
 
 void TraceProcessorImpl::EnableMetatrace(MetatraceConfig config) {
   metatrace::Enable(config);
+}
+
+void TraceProcessorImpl::InitPerfettoSqlEngine() {
+  engine_.reset(new PerfettoSqlEngine(context_.storage->mutable_string_pool()));
+  sqlite3* db = engine_->sqlite_engine()->db();
+  sqlite3_str_split_init(db);
+
+  // Register SQL functions only used in local development instances.
+  if (config_.enable_dev_features) {
+    RegisterFunction<WriteFile>(engine_.get(), "WRITE_FILE", 2);
+  }
+  RegisterFunction<Glob>(engine_.get(), "glob", 2);
+  RegisterFunction<Hash>(engine_.get(), "HASH", -1);
+  RegisterFunction<Base64Encode>(engine_.get(), "BASE64_ENCODE", 1);
+  RegisterFunction<Demangle>(engine_.get(), "DEMANGLE", 1);
+  RegisterFunction<SourceGeq>(engine_.get(), "SOURCE_GEQ", -1);
+  RegisterFunction<ExportJson>(engine_.get(), "EXPORT_JSON", 1,
+                               context_.storage.get(), false);
+  RegisterFunction<ExtractArg>(engine_.get(), "EXTRACT_ARG", 2,
+                               context_.storage.get());
+  RegisterFunction<AbsTimeStr>(engine_.get(), "ABS_TIME_STR", 1,
+                               context_.clock_converter.get());
+  RegisterFunction<Reverse>(engine_.get(), "REVERSE", 1);
+  RegisterFunction<ToMonotonic>(engine_.get(), "TO_MONOTONIC", 1,
+                                context_.clock_converter.get());
+  RegisterFunction<ToRealtime>(engine_.get(), "TO_REALTIME", 1,
+                               context_.clock_converter.get());
+  RegisterFunction<ToTimecode>(engine_.get(), "TO_TIMECODE", 1);
+  RegisterFunction<CreateFunction>(engine_.get(), "CREATE_FUNCTION", 3,
+                                   engine_.get());
+  RegisterFunction<CreateViewFunction>(engine_.get(), "CREATE_VIEW_FUNCTION", 3,
+                                       engine_.get());
+  RegisterFunction<ExperimentalMemoize>(engine_.get(), "EXPERIMENTAL_MEMOIZE",
+                                        1, engine_.get());
+  RegisterFunction<Import>(
+      engine_.get(), "IMPORT", 1,
+      std::unique_ptr<Import::Context>(new Import::Context{engine_.get()}));
+  RegisterFunction<ToFtrace>(
+      engine_.get(), "TO_FTRACE", 1,
+      std::unique_ptr<ToFtrace::Context>(new ToFtrace::Context{
+          context_.storage.get(), SystraceSerializer(&context_)}));
+
+  if constexpr (regex::IsRegexSupported()) {
+    RegisterFunction<Regex>(engine_.get(), "regexp", 2);
+  }
+  // Old style function registration.
+  // TODO(lalitm): migrate this over to using RegisterFunction once aggregate
+  // functions are supported.
+  RegisterLastNonNullFunction(db);
+  RegisterValueAtMaxTsFunction(db);
+  {
+    base::Status status = RegisterStackFunctions(engine_.get(), &context_);
+    if (!status.ok())
+      PERFETTO_ELOG("%s", status.c_message());
+  }
+  {
+    base::Status status = PprofFunctions::Register(db, &context_);
+    if (!status.ok())
+      PERFETTO_ELOG("%s", status.c_message());
+  }
+  {
+    base::Status status = LayoutFunctions::Register(db, &context_);
+    if (!status.ok())
+      PERFETTO_ELOG("%s", status.c_message());
+  }
+  {
+    base::Status status = RegisterMathFunctions(*engine_.get());
+    if (!status.ok())
+      PERFETTO_ELOG("%s", status.c_message());
+  }
+
+  const TraceStorage* storage = context_.storage.get();
+
+  // Operator tables.
+  engine_->sqlite_engine()->RegisterVirtualTableModule<SpanJoinOperatorTable>(
+      "span_join", engine_.get(), SqliteTable::TableType::kExplicitCreate,
+      false);
+  engine_->sqlite_engine()->RegisterVirtualTableModule<SpanJoinOperatorTable>(
+      "span_left_join", engine_.get(), SqliteTable::TableType::kExplicitCreate,
+      false);
+  engine_->sqlite_engine()->RegisterVirtualTableModule<SpanJoinOperatorTable>(
+      "span_outer_join", engine_.get(), SqliteTable::TableType::kExplicitCreate,
+      false);
+  engine_->sqlite_engine()->RegisterVirtualTableModule<WindowOperatorTable>(
+      "window", storage, SqliteTable::TableType::kExplicitCreate, true);
+
+  // Initalize the tables and views in the prelude.
+  InitializePreludeTablesViews(db);
+
+  // Register stdlib modules.
+  auto stdlib_modules = GetStdlibModules();
+  for (auto module_it = stdlib_modules.GetIterator(); module_it; ++module_it) {
+    base::Status status =
+        RegisterSqlModule({module_it.key(), module_it.value(), false});
+    if (!status.ok())
+      PERFETTO_ELOG("%s", status.c_message());
+  }
+
+  // Register metrics functions.
+  // TODO(lalitm): migrate this over to using RegisterFunction once aggregate
+  // functions are supported.
+  {
+    auto ret = sqlite3_create_function_v2(
+        db, "RepeatedField", 1, SQLITE_UTF8, nullptr, nullptr,
+        metrics::RepeatedFieldStep, metrics::RepeatedFieldFinal, nullptr);
+    if (ret)
+      PERFETTO_FATAL("Error initializing RepeatedField");
+  }
+
+  RegisterFunction<metrics::NullIfEmpty>(engine_.get(), "NULL_IF_EMPTY", 1);
+  RegisterFunction<metrics::UnwrapMetricProto>(engine_.get(),
+                                               "UNWRAP_METRIC_PROTO", 2);
+  RegisterFunction<metrics::RunMetric>(
+      engine_.get(), "RUN_METRIC", -1,
+      std::unique_ptr<metrics::RunMetric::Context>(
+          new metrics::RunMetric::Context{engine_.get(), &sql_metrics_}));
+
+  // Legacy tables.
+  engine_->sqlite_engine()->RegisterVirtualTableModule<SqlStatsTable>(
+      "sqlstats", storage, SqliteTable::TableType::kEponymousOnly, false);
+  engine_->sqlite_engine()->RegisterVirtualTableModule<StatsTable>(
+      "stats", storage, SqliteTable::TableType::kEponymousOnly, false);
+
+  // New style db-backed tables.
+  // Note: if adding a table here which might potentially contain many rows
+  // (O(rows in sched/slice/counter)), then consider calling ShrinkToFit on
+  // that table in TraceStorage::ShrinkToFitTables.
+  RegisterStaticTable(storage->arg_table());
+  RegisterStaticTable(storage->raw_table());
+  RegisterStaticTable(storage->ftrace_event_table());
+  RegisterStaticTable(storage->thread_table());
+  RegisterStaticTable(storage->process_table());
+  RegisterStaticTable(storage->filedescriptor_table());
+
+  RegisterStaticTable(storage->slice_table());
+  RegisterStaticTable(storage->flow_table());
+  RegisterStaticTable(storage->slice_table());
+  RegisterStaticTable(storage->sched_slice_table());
+  RegisterStaticTable(storage->spurious_sched_wakeup_table());
+  RegisterStaticTable(storage->thread_state_table());
+  RegisterStaticTable(storage->gpu_slice_table());
+
+  RegisterStaticTable(storage->track_table());
+  RegisterStaticTable(storage->thread_track_table());
+  RegisterStaticTable(storage->process_track_table());
+  RegisterStaticTable(storage->cpu_track_table());
+  RegisterStaticTable(storage->gpu_track_table());
+
+  RegisterStaticTable(storage->counter_table());
+
+  RegisterStaticTable(storage->counter_track_table());
+  RegisterStaticTable(storage->process_counter_track_table());
+  RegisterStaticTable(storage->thread_counter_track_table());
+  RegisterStaticTable(storage->cpu_counter_track_table());
+  RegisterStaticTable(storage->irq_counter_track_table());
+  RegisterStaticTable(storage->softirq_counter_track_table());
+  RegisterStaticTable(storage->gpu_counter_track_table());
+  RegisterStaticTable(storage->gpu_counter_group_table());
+  RegisterStaticTable(storage->perf_counter_track_table());
+  RegisterStaticTable(storage->energy_counter_track_table());
+  RegisterStaticTable(storage->uid_counter_track_table());
+  RegisterStaticTable(storage->energy_per_uid_counter_track_table());
+
+  RegisterStaticTable(storage->heap_graph_object_table());
+  RegisterStaticTable(storage->heap_graph_reference_table());
+  RegisterStaticTable(storage->heap_graph_class_table());
+
+  RegisterStaticTable(storage->symbol_table());
+  RegisterStaticTable(storage->heap_profile_allocation_table());
+  RegisterStaticTable(storage->cpu_profile_stack_sample_table());
+  RegisterStaticTable(storage->perf_sample_table());
+  RegisterStaticTable(storage->stack_profile_callsite_table());
+  RegisterStaticTable(storage->stack_profile_mapping_table());
+  RegisterStaticTable(storage->stack_profile_frame_table());
+  RegisterStaticTable(storage->package_list_table());
+  RegisterStaticTable(storage->profiler_smaps_table());
+
+  RegisterStaticTable(storage->android_log_table());
+  RegisterStaticTable(storage->android_dumpstate_table());
+  RegisterStaticTable(storage->android_game_intervention_list_table());
+
+  RegisterStaticTable(storage->vulkan_memory_allocations_table());
+
+  RegisterStaticTable(storage->graphics_frame_slice_table());
+
+  RegisterStaticTable(storage->expected_frame_timeline_slice_table());
+  RegisterStaticTable(storage->actual_frame_timeline_slice_table());
+
+  RegisterStaticTable(storage->surfaceflinger_layers_snapshot_table());
+  RegisterStaticTable(storage->surfaceflinger_layer_table());
+  RegisterStaticTable(storage->surfaceflinger_transactions_table());
+
+  RegisterStaticTable(storage->window_manager_shell_transitions_table());
+  RegisterStaticTable(
+      storage->window_manager_shell_transition_handlers_table());
+
+  RegisterStaticTable(storage->metadata_table());
+  RegisterStaticTable(storage->cpu_table());
+  RegisterStaticTable(storage->cpu_freq_table());
+  RegisterStaticTable(storage->clock_snapshot_table());
+
+  RegisterStaticTable(storage->memory_snapshot_table());
+  RegisterStaticTable(storage->process_memory_snapshot_table());
+  RegisterStaticTable(storage->memory_snapshot_node_table());
+  RegisterStaticTable(storage->memory_snapshot_edge_table());
+
+  RegisterStaticTable(storage->experimental_proto_path_table());
+  RegisterStaticTable(storage->experimental_proto_content_table());
+
+  RegisterStaticTable(storage->experimental_missing_chrome_processes_table());
+
+  // Tables dynamically generated at query time.
+  engine_->RegisterStaticTableFunction(std::unique_ptr<ExperimentalFlamegraph>(
+      new ExperimentalFlamegraph(&context_)));
+  engine_->RegisterStaticTableFunction(std::unique_ptr<ExperimentalCounterDur>(
+      new ExperimentalCounterDur(storage->counter_table())));
+  engine_->RegisterStaticTableFunction(std::unique_ptr<ExperimentalSliceLayout>(
+      new ExperimentalSliceLayout(context_.storage.get()->mutable_string_pool(),
+                                  &storage->slice_table())));
+  engine_->RegisterStaticTableFunction(std::unique_ptr<Ancestor>(
+      new Ancestor(Ancestor::Type::kSlice, context_.storage.get())));
+  engine_->RegisterStaticTableFunction(std::unique_ptr<Ancestor>(new Ancestor(
+      Ancestor::Type::kStackProfileCallsite, context_.storage.get())));
+  engine_->RegisterStaticTableFunction(std::unique_ptr<Ancestor>(
+      new Ancestor(Ancestor::Type::kSliceByStack, context_.storage.get())));
+  engine_->RegisterStaticTableFunction(std::unique_ptr<Descendant>(
+      new Descendant(Descendant::Type::kSlice, context_.storage.get())));
+  engine_->RegisterStaticTableFunction(std::unique_ptr<Descendant>(
+      new Descendant(Descendant::Type::kSliceByStack, context_.storage.get())));
+  engine_->RegisterStaticTableFunction(std::unique_ptr<ConnectedFlow>(
+      new ConnectedFlow(ConnectedFlow::Mode::kDirectlyConnectedFlow,
+                        context_.storage.get())));
+  engine_->RegisterStaticTableFunction(
+      std::unique_ptr<ConnectedFlow>(new ConnectedFlow(
+          ConnectedFlow::Mode::kPrecedingFlow, context_.storage.get())));
+  engine_->RegisterStaticTableFunction(
+      std::unique_ptr<ConnectedFlow>(new ConnectedFlow(
+          ConnectedFlow::Mode::kFollowingFlow, context_.storage.get())));
+  engine_->RegisterStaticTableFunction(
+      std::unique_ptr<ExperimentalSchedUpid>(new ExperimentalSchedUpid(
+          storage->sched_slice_table(), storage->thread_table())));
+  engine_->RegisterStaticTableFunction(
+      std::unique_ptr<ExperimentalAnnotatedStack>(
+          new ExperimentalAnnotatedStack(&context_)));
+  engine_->RegisterStaticTableFunction(std::unique_ptr<ExperimentalFlatSlice>(
+      new ExperimentalFlatSlice(&context_)));
+
+  // Views.
+  engine_->RegisterStaticTableFunction(
+      std::unique_ptr<StaticTableFunction>(new ViewStaticTableFunction(
+          &storage->thread_slice_view(), views::ThreadSliceView::Name())));
+
+  // Metrics.
+  RegisterAllProtoBuilderFunctions(&pool_, engine_.get(), this);
+
+  for (const auto& metric : sql_metrics_) {
+    if (metric.proto_field_name) {
+      InsertIntoTraceMetricsTable(db, *metric.proto_field_name);
+    }
+  }
+
+  // Import prelude module.
+  {
+    auto result = engine_->Execute(SqlSource::FromTraceProcessorImplementation(
+        "INCLUDE PERFETTO MODULE prelude.*"));
+    if (!result.status().ok()) {
+      PERFETTO_FATAL("Failed to import prelude: %s",
+                     result.status().c_message());
+    }
+  }
+
+  // Fill trace bounds table.
+  BuildBoundsTable(db, context_.storage->GetTraceTimestampBoundsNs());
 }
 
 namespace {

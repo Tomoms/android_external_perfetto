@@ -15,6 +15,7 @@ import {
   HighPrecisionTime,
   HighPrecisionTimeSpan,
 } from '../../common/high_precision_time';
+import {raf} from '../../core/raf_scheduler';
 import {globals} from '../globals';
 import {TimeScale} from '../time_scale';
 
@@ -27,7 +28,7 @@ export abstract class DragStrategy {
 
   protected updateGlobals(tStart: HighPrecisionTime, tEnd: HighPrecisionTime) {
     const vizTime = new HighPrecisionTimeSpan(tStart, tEnd);
-    globals.frontendLocalState.updateVisibleTime(vizTime);
-    globals.rafScheduler.scheduleRedraw();
+    globals.timeline.updateVisibleTime(vizTime);
+    raf.scheduleRedraw();
   }
 }

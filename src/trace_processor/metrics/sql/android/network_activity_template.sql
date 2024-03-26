@@ -13,7 +13,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
-SELECT IMPORT('android.network_packets');
+INCLUDE PERFETTO MODULE android.network_packets;
 
 -- Creates a view of aggregated network activity. It is common among networking
 -- to have the interface active for some time after network use. For example, in
@@ -34,7 +34,8 @@ SELECT IMPORT('android.network_packets');
 -- @column dur           The duration of the current segment.
 -- @column packet_count  The total number of packets in this segment.
 -- @column packet_length The total number of bytes for packets in this segment.
-CREATE VIEW {{view_name}} AS
+DROP VIEW IF EXISTS {{view_name}};
+CREATE PERFETTO VIEW {{view_name}} AS
 WITH quantized AS (
   SELECT
     {{group_by}},
@@ -49,7 +50,7 @@ WITH quantized AS (
 with_last AS (
   SELECT
     *,
-    LAG(ts) OVER (
+    LAG(ts+dur) OVER (
       PARTITION BY {{group_by}}
       ORDER BY ts
     ) AS last_ts

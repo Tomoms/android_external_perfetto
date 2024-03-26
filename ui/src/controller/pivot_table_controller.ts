@@ -16,9 +16,6 @@
 
 import {Actions} from '../common/actions';
 import {DEFAULT_CHANNEL, getCurrentChannel} from '../common/channels';
-import {Engine} from '../common/engine';
-import {featureFlags} from '../common/feature_flags';
-import {ColumnType, STR} from '../common/query_result';
 import {
   AreaSelection,
   PivotTableQuery,
@@ -26,12 +23,15 @@ import {
   PivotTableResult,
   PivotTableState,
 } from '../common/state';
+import {featureFlags} from '../core/feature_flags';
 import {globals} from '../frontend/globals';
 import {
   aggregationIndex,
   generateQueryFromState,
 } from '../frontend/pivot_table_query_generator';
 import {Aggregation, PivotTree} from '../frontend/pivot_table_types';
+import {Engine} from '../trace_processor/engine';
+import {ColumnType, STR} from '../trace_processor/query_result';
 
 import {Controller} from './controller';
 
@@ -197,7 +197,7 @@ export class PivotTableController extends Controller<{}> {
     }
 
     // ES6 Set does not have .every method, only Array does.
-    for (const track in tracks) {
+    for (const track of tracks) {
       if (!this.lastQueryAreaTracks.has(track)) {
         return false;
       }

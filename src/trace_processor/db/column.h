@@ -27,54 +27,11 @@
 #include "src/trace_processor/db/column_storage.h"
 #include "src/trace_processor/db/column_storage_overlay.h"
 #include "src/trace_processor/db/compare.h"
+#include "src/trace_processor/db/storage/types.h"
 #include "src/trace_processor/db/typed_column_internal.h"
 
 namespace perfetto {
 namespace trace_processor {
-
-// Represents the possible filter operations on a column.
-enum class FilterOp {
-  kEq,
-  kNe,
-  kGt,
-  kLt,
-  kGe,
-  kLe,
-  kIsNull,
-  kIsNotNull,
-  kGlob,
-};
-
-// Represents a constraint on a column.
-struct Constraint {
-  uint32_t col_idx;
-  FilterOp op;
-  SqlValue value;
-};
-
-// Represents an order by operation on a column.
-struct Order {
-  uint32_t col_idx;
-  bool desc;
-};
-
-// The enum type of the column.
-// Public only to stop GCC complaining about templates being defined in a
-// non-namespace scope (see ColumnTypeHelper below).
-enum class ColumnType {
-  // Standard primitive types.
-  kInt32,
-  kUint32,
-  kInt64,
-  kDouble,
-  kString,
-
-  // Types generated on the fly.
-  kId,
-
-  // Types which don't have any data backing them.
-  kDummy,
-};
 
 // Helper class for converting a type to a ColumnType.
 template <typename T>
@@ -256,7 +213,9 @@ class Column {
   // Creates a Column which returns the index as the value of the row.
   static Column IdColumn(Table* table,
                          uint32_t col_idx_in_table,
-                         uint32_t row_map_idx);
+                         uint32_t row_map_idx,
+                         const char* name = "id",
+                         uint32_t flags = kIdFlags);
 
   // Gets the value of the Column at the given |row|.
   SqlValue Get(uint32_t row) const { return GetAtIdx(overlay().Get(row)); }
@@ -427,6 +386,13 @@ class Column {
   Constraint is_null() const {
     return Constraint{index_in_table_, FilterOp::kIsNull, SqlValue()};
   }
+  Constraint glob_value(SqlValue value) const {
+    return Constraint{index_in_table_, FilterOp::kGlob, value};
+  }
+
+  Constraint regex_value(SqlValue value) const {
+    return Constraint{index_in_table_, FilterOp::kRegex, value};
+  }
 
   // Returns an Order for each Order type for this Column.
   Order ascending() const { return Order{index_in_table_, false}; }
@@ -456,6 +422,8 @@ class Column {
     PERFETTO_DCHECK(tc_internal::TypeHandler<T>::is_optional == IsNullable());
     return *static_cast<ColumnStorage<stored_type<T>>*>(storage_);
   }
+
+  const ColumnStorageBase& storage_base() const { return *storage_; }
 
  protected:
   // Returns the backing sparse vector cast to contain data of type T.
@@ -579,6 +547,7 @@ class Column {
       case FilterOp::kIsNull:
       case FilterOp::kIsNotNull:
       case FilterOp::kGlob:
+      case FilterOp::kRegex:
         break;
     }
     return false;

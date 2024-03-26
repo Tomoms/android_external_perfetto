@@ -23,7 +23,7 @@ import {
   SortDirection,
   withDirection,
 } from '../../base/comparison_utils';
-import {globals} from '../globals';
+import {raf} from '../../core/raf_scheduler';
 import {
   menuItem,
   PopupMenuButton,
@@ -89,6 +89,11 @@ export function stringColumn<T>(
   return new ColumnDescriptor<T>(name, getter, {contextMenu, sortKey: getter});
 }
 
+export function widgetColumn<T>(
+    name: string, getter: (t: T) => m.Child): ColumnDescriptor<T> {
+  return new ColumnDescriptor<T>(name, getter);
+}
+
 interface SortingInfo<T> {
   columnId: string;
   direction: SortDirection;
@@ -124,13 +129,13 @@ export class TableData<T> {
     if (this._sortingInfo !== undefined) {
       this.reorder(this._sortingInfo);
     }
-    globals.rafScheduler.scheduleFullRedraw();
+    raf.scheduleFullRedraw();
   }
 
   resetOrder() {
     this.permutation = range(this.data.length);
     this._sortingInfo = undefined;
-    globals.rafScheduler.scheduleFullRedraw();
+    raf.scheduleFullRedraw();
   }
 
   get sortingInfo(): SortingInfo<T>|undefined {
@@ -142,7 +147,7 @@ export class TableData<T> {
     this.permutation.sort(withDirection(
         comparingBy((index: number) => this.data[index], info.ordering),
         info.direction));
-    globals.rafScheduler.scheduleFullRedraw();
+    raf.scheduleFullRedraw();
   }
 }
 
@@ -152,15 +157,19 @@ export interface TableAttrs<T> {
 }
 
 function directionOnIndex(
-    columnId: string, info?: SortingInfo<any>): SortDirection|undefined {
+    columnId: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    info?: SortingInfo<any>): SortDirection|undefined {
   if (info === undefined) {
     return undefined;
   }
   return info.columnId === columnId ? info.direction : undefined;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export class Table implements m.ClassComponent<TableAttrs<any>> {
   renderColumnHeader(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       vnode: m.Vnode<TableAttrs<any>>, column: ColumnDescriptor<any>): m.Child {
     let currDirection: SortDirection|undefined = undefined;
 
@@ -202,20 +211,24 @@ export class Table implements m.ClassComponent<TableAttrs<any>> {
         }));
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   checkValid(attrs: TableAttrs<any>) {
     if (!allUnique(attrs.columns.map((c) => c.id))) {
       throw new Error('column IDs should be unique');
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   oncreate(vnode: m.VnodeDOM<TableAttrs<any>, this>) {
     this.checkValid(vnode.attrs);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   onupdate(vnode: m.VnodeDOM<TableAttrs<any>, this>) {
     this.checkValid(vnode.attrs);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   view(vnode: m.Vnode<TableAttrs<any>>): m.Child {
     const attrs = vnode.attrs;
 

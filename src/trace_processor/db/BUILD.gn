@@ -20,22 +20,14 @@ source_set("db") {
     "base_id.h",
     "column.cc",
     "column.h",
-    "column_overlay.cc",
-    "column_overlay.h",
     "column_storage.cc",
     "column_storage.h",
     "column_storage_overlay.h",
     "compare.h",
-    "null_overlay.cc",
-    "null_overlay.h",
-    "numeric_storage.cc",
-    "numeric_storage.h",
-    "sorting_overlay.h",
-    "storage.cc",
-    "storage.h",
-    "storage_overlay.cc",
-    "storage_overlay.h",
-    "storage_variants.h",
+    "query_executor.cc",
+    "query_executor.h",
+    "runtime_table.cc",
+    "runtime_table.h",
     "table.cc",
     "table.h",
     "typed_column.h",
@@ -50,6 +42,17 @@ source_set("db") {
     "../../../include/perfetto/trace_processor",
     "../containers",
     "../util:glob",
+    "../util:regex",
+    "../util:util",
+    "storage",
+  ]
+}
+
+source_set("compare") {
+  sources = [ "compare.h" ]
+  deps = [
+    "../../../include/perfetto/trace_processor",
+    "../containers",
   ]
 }
 
@@ -62,7 +65,8 @@ perfetto_unittest_source_set("unittests") {
   sources = [
     "column_storage_overlay_unittest.cc",
     "compare_unittest.cc",
-    "storage_unittest.cc",
+    "query_executor_unittest.cc",
+    "runtime_table_unittest.cc",
     "view_unittest.cc",
   ]
   deps = [
@@ -70,9 +74,12 @@ perfetto_unittest_source_set("unittests") {
     ":view_unittest",
     "../../../gn:default_deps",
     "../../../gn:gtest_and_gmock",
+    "../../../include/perfetto/trace_processor:basic_types",
     "../../base",
     "../tables",
     "../views",
+    "storage",
+    "storage:fake_storage",
   ]
 }
 
@@ -83,7 +90,15 @@ if (enable_perfetto_benchmarks) {
       ":db",
       "../../../gn:benchmark",
       "../../../gn:default_deps",
+      "../../../include/perfetto/base",
+      "../../../include/perfetto/ext/base",
+      "../../../include/perfetto/trace_processor:basic_types",
+      "../../base:test_support",
+      "../tables:tables_python",
     ]
-    sources = [ "column_storage_overlay_benchmark.cc" ]
+    sources = [
+      "column_storage_overlay_benchmark.cc",
+      "query_executor_benchmark.cc",
+    ]
   }
 }

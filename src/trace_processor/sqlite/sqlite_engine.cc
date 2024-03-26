@@ -16,12 +16,21 @@
 
 #include "src/trace_processor/sqlite/sqlite_engine.h"
 
+#include <memory>
+#include <optional>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "perfetto/base/status.h"
+#include "perfetto/ext/base/string_utils.h"
+#include "perfetto/public/compiler.h"
 #include "src/trace_processor/sqlite/db_sqlite_table.h"
 #include "src/trace_processor/sqlite/query_cache.h"
+#include "src/trace_processor/sqlite/scoped_db.h"
+#include "src/trace_processor/sqlite/sql_source.h"
 #include "src/trace_processor/sqlite/sqlite_table.h"
+#include "src/trace_processor/sqlite/sqlite_utils.h"
 
 // In Android and Chromium tree builds, we don't have the percentile module.
 // Just don't include it.
@@ -61,17 +70,62 @@ void InitializeSqlite(sqlite3* db) {
 #endif
 }
 
+std::optional<uint32_t> GetErrorOffsetDb(sqlite3* db) {
+  int offset = sqlite3_error_offset(db);
+  return offset == -1 ? std::nullopt
+                      : std::make_optional(static_cast<uint32_t>(offset));
+}
+
 }  // namespace
 
-SqliteEngine::SqliteEngine() : query_cache_(new QueryCache()) {
+SqliteEngine::SqliteEngine() {
   sqlite3* db = nullptr;
   EnsureSqliteInitialized();
-  PERFETTO_CHECK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+
+  // Ensure that we open the database with mutexes disabled: this is because
+  // trace processor as a whole cannot be used from multiple threads so there is
+  // no point paying the (potentially significant) cost of mutexes at the SQLite
+  // level.
+  static constexpr int kSqliteOpenFlags =
+      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX;
+  PERFETTO_CHECK(sqlite3_open_v2(":memory:", &db, kSqliteOpenFlags, nullptr) ==
+                 SQLITE_OK);
   InitializeSqlite(db);
   db_.reset(std::move(db));
 }
 
 SqliteEngine::~SqliteEngine() {
+  // IMPORTANT: the order of operations in this destructor is very sensitive and
+  // should not be changed without careful consideration of the consequences.
+  // Thankfully, because we are very aggressive with PERFETTO_CHECK, mistakes
+  // will usually manifest as crashes, but this is not guaranteed.
+
+  // Drop any explicitly created virtual tables before destroying the database
+  // so that any prepared statements are correctly finalized. Note that we need
+  // to do this in two steps (first create all the SQLs before then executing
+  // them) because |OnSqliteTableDestroyed| will be called as each DROP is
+  // executed.
+  std::vector<std::string> drop_stmts;
+  std::unordered_set<std::string> dropped_tables;
+  for (auto it = all_created_sqlite_tables_.rbegin();
+       it != all_created_sqlite_tables_.rend(); it++) {
+    if (auto* type = sqlite_tables_.Find(*it);
+        !type || *type != SqliteTable::TableType::kExplicitCreate) {
+      continue;
+    }
+    if (auto it_and_ins = dropped_tables.insert(*it); !it_and_ins.second) {
+      continue;
+    }
+    base::StackString<1024> drop("DROP TABLE %s", it->c_str());
+    drop_stmts.emplace_back(drop.ToStdString());
+  }
+  for (const auto& drop : drop_stmts) {
+    int ret = sqlite3_exec(db(), drop.c_str(), nullptr, nullptr, nullptr);
+    if (PERFETTO_UNLIKELY(ret != SQLITE_OK)) {
+      PERFETTO_FATAL("Failed to execute statement: '%s'", drop.c_str());
+    }
+  }
+
   // It is important to unregister any functions that have been registered with
   // the database before destroying it. This is because functions can hold onto
   // prepared statements, which must be finalized before database destruction.
@@ -79,40 +133,81 @@ SqliteEngine::~SqliteEngine() {
     int ret = sqlite3_create_function_v2(db_.get(), it.key().first.c_str(),
                                          it.key().second, SQLITE_UTF8, nullptr,
                                          nullptr, nullptr, nullptr, nullptr);
-    PERFETTO_CHECK(ret == 0);
+    if (PERFETTO_UNLIKELY(ret != SQLITE_OK)) {
+      PERFETTO_FATAL("Failed to drop function: '%s'", it.key().first.c_str());
+    }
   }
   fn_ctx_.Clear();
-}
 
-void SqliteEngine::RegisterTable(const Table& table,
-                                 const std::string& table_name) {
-  DbSqliteTable::Context context{query_cache_.get(),
-                                 DbSqliteTable::TableComputation::kStatic,
-                                 &table, nullptr};
-  RegisterVirtualTableModule<DbSqliteTable>(table_name, std::move(context),
-                                            SqliteTable::kEponymousOnly, false);
+  // Reset the database itself.
+  db_.reset();
 
-  // Register virtual tables into an internal 'perfetto_tables' table.
-  // This is used for iterating through all the tables during a database
-  // export.
-  char* insert_sql = sqlite3_mprintf(
-      "INSERT INTO perfetto_tables(name) VALUES('%q')", table_name.c_str());
-  char* error = nullptr;
-  sqlite3_exec(db_.get(), insert_sql, nullptr, nullptr, &error);
-  sqlite3_free(insert_sql);
-  if (error) {
-    PERFETTO_ELOG("Error adding table to perfetto_tables: %s", error);
-    sqlite3_free(error);
+  // SQLite is not guaranteed to pick saved tables back up when destroyed as
+  // from it's perspective, it has called xDisconnect. Make sure to do that
+  // ourselves.
+  saved_tables_.Clear();
+
+  // The above operations should have cleared all the tables.
+  if (PERFETTO_UNLIKELY(sqlite_tables_.size() != 0)) {
+    std::vector<std::string> tables;
+    for (auto it = sqlite_tables_.GetIterator(); it; ++it) {
+      tables.push_back(it.key());
+    }
+    std::string joined = base::Join(tables, ",");
+    PERFETTO_FATAL(
+        "SqliteTable instances still exist: count='%zu', tables='[%s]'",
+        sqlite_tables_.size(), joined.c_str());
   }
 }
 
-void SqliteEngine::RegisterTableFunction(std::unique_ptr<TableFunction> fn) {
-  std::string table_name = fn->TableName();
-  DbSqliteTable::Context context{query_cache_.get(),
-                                 DbSqliteTable::TableComputation::kDynamic,
-                                 nullptr, std::move(fn)};
-  RegisterVirtualTableModule<DbSqliteTable>(table_name, std::move(context),
-                                            SqliteTable::kEponymousOnly, false);
+SqliteEngine::PreparedStatement SqliteEngine::PrepareStatement(SqlSource sql) {
+  PERFETTO_TP_TRACE(metatrace::Category::QUERY_DETAILED, "QUERY_PREPARE");
+  sqlite3_stmt* raw_stmt = nullptr;
+  int err =
+      sqlite3_prepare_v2(db_.get(), sql.sql().c_str(), -1, &raw_stmt, nullptr);
+  PreparedStatement statement{ScopedStmt(raw_stmt), std::move(sql)};
+  if (err != SQLITE_OK) {
+    const char* errmsg = sqlite3_errmsg(db_.get());
+    std::string frame =
+        statement.sql_source_.AsTracebackForSqliteOffset(GetErrorOffset());
+    base::Status status = base::ErrStatus("%s%s", frame.c_str(), errmsg);
+    status.SetPayload("perfetto.dev/has_traceback", "true");
+
+    statement.status_ = std::move(status);
+    return statement;
+  }
+  if (!raw_stmt) {
+    statement.status_ = base::ErrStatus("No SQL to execute");
+  }
+  return statement;
+}
+
+base::Status SqliteEngine::RegisterFunction(const char* name,
+                                            int argc,
+                                            Fn* fn,
+                                            void* ctx,
+                                            FnCtxDestructor* destructor,
+                                            bool deterministic) {
+  int flags = SQLITE_UTF8 | (deterministic ? SQLITE_DETERMINISTIC : 0);
+  int ret =
+      sqlite3_create_function_v2(db_.get(), name, static_cast<int>(argc), flags,
+                                 ctx, fn, nullptr, nullptr, destructor);
+  if (ret != SQLITE_OK) {
+    return base::ErrStatus("Unable to register function with name %s", name);
+  }
+  *fn_ctx_.Insert(std::make_pair(name, argc), ctx).first = ctx;
+  return base::OkStatus();
+}
+
+base::Status SqliteEngine::UnregisterFunction(const char* name, int argc) {
+  int ret = sqlite3_create_function_v2(db_.get(), name, static_cast<int>(argc),
+                                       SQLITE_UTF8, nullptr, nullptr, nullptr,
+                                       nullptr, nullptr);
+  if (ret != SQLITE_OK) {
+    return base::ErrStatus("Unable to unregister function with name %s", name);
+  }
+  fn_ctx_.Erase({name, argc});
+  return base::OkStatus();
 }
 
 base::Status SqliteEngine::DeclareVirtualTable(const std::string& create_stmt) {
@@ -142,12 +237,71 @@ base::StatusOr<std::unique_ptr<SqliteTable>> SqliteEngine::RestoreSqliteTable(
     return base::ErrStatus("Table with name %s does not exist in saved state",
                            table_name.c_str());
   }
-  return std::move(*res);
+  std::unique_ptr<SqliteTable> table = std::move(*res);
+  PERFETTO_CHECK(saved_tables_.Erase(table_name));
+  return std::move(table);
 }
 
 void* SqliteEngine::GetFunctionContext(const std::string& name, int argc) {
   auto* res = fn_ctx_.Find(std::make_pair(name, argc));
   return res ? *res : nullptr;
+}
+
+std::optional<uint32_t> SqliteEngine::GetErrorOffset() const {
+  return GetErrorOffsetDb(db_.get());
+}
+
+void SqliteEngine::OnSqliteTableCreated(const std::string& name,
+                                        SqliteTable::TableType type) {
+  auto it_and_inserted = sqlite_tables_.Insert(name, type);
+  PERFETTO_CHECK(it_and_inserted.second);
+  all_created_sqlite_tables_.push_back(name);
+}
+
+void SqliteEngine::OnSqliteTableDestroyed(const std::string& name) {
+  PERFETTO_CHECK(sqlite_tables_.Erase(name));
+}
+
+SqliteEngine::PreparedStatement::PreparedStatement(ScopedStmt stmt,
+                                                   SqlSource source)
+    : stmt_(std::move(stmt)),
+      expanded_sql_(sqlite3_expanded_sql(stmt_.get())),
+      sql_source_(std::move(source)) {}
+
+bool SqliteEngine::PreparedStatement::Step() {
+  PERFETTO_TP_TRACE(metatrace::Category::QUERY_DETAILED, "STMT_STEP",
+                    [this](metatrace::Record* record) {
+                      record->AddArg("Original SQL", original_sql());
+                      record->AddArg("Executed SQL", sql());
+                    });
+
+  // Now step once into |cur_stmt| so that when we prepare the next statment
+  // we will have executed any dependent bytecode in this one.
+  int err = sqlite3_step(stmt_.get());
+  if (err == SQLITE_ROW) {
+    return true;
+  }
+  if (err == SQLITE_DONE) {
+    return false;
+  }
+  sqlite3* db = sqlite3_db_handle(stmt_.get());
+  std::string frame =
+      sql_source_.AsTracebackForSqliteOffset(GetErrorOffsetDb(db));
+  const char* errmsg = sqlite3_errmsg(db);
+  status_ = base::ErrStatus("%s%s", frame.c_str(), errmsg);
+  return false;
+}
+
+bool SqliteEngine::PreparedStatement::IsDone() const {
+  return !sqlite3_stmt_busy(stmt_.get());
+}
+
+const char* SqliteEngine::PreparedStatement::original_sql() const {
+  return sql_source_.original_sql().c_str();
+}
+
+const char* SqliteEngine::PreparedStatement::sql() const {
+  return expanded_sql_.get();
 }
 
 }  // namespace trace_processor

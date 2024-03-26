@@ -209,9 +209,9 @@ HeapprofdProducer::HeapprofdProducer(HeapprofdMode mode,
     : task_runner_(task_runner),
       mode_(mode),
       exit_when_done_(exit_when_done),
-      unwinding_workers_(MakeUnwindingWorkers(this, kUnwinderThreads)),
       socket_delegate_(this),
-      weak_factory_(this) {
+      weak_factory_(this),
+      unwinding_workers_(MakeUnwindingWorkers(this, kUnwinderThreads)) {
   CheckDataSourceCpuTask();
   CheckDataSourceMemoryTask();
 }
@@ -765,7 +765,8 @@ void HeapprofdProducer::DumpAll() {
 
 void HeapprofdProducer::Flush(FlushRequestID flush_id,
                               const DataSourceInstanceID* ids,
-                              size_t num_ids) {
+                              size_t num_ids,
+                              FlushFlags) {
   size_t& flush_in_progress = flushes_in_progress_[flush_id];
   PERFETTO_DCHECK(flush_in_progress == 0);
   flush_in_progress = num_ids;

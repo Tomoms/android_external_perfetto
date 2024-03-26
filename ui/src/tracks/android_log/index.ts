@@ -12,17 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {PluginContext} from '../../common/plugin_api';
-import {NUM} from '../../common/query_result';
-import {fromNs, TPDuration, TPTime} from '../../common/time';
-import {TrackData} from '../../common/track_data';
-import {LIMIT} from '../../common/track_data';
+import {duration, Time, time} from '../../base/time';
 import {
-  TrackController,
-} from '../../controller/track_controller';
+  TrackAdapter,
+  TrackControllerAdapter,
+  TrackWithControllerAdapter,
+} from '../../common/track_adapter';
+import {LIMIT, TrackData} from '../../common/track_data';
 import {checkerboardExcept} from '../../frontend/checkerboard';
 import {globals} from '../../frontend/globals';
-import {NewTrackArgs, Track} from '../../frontend/track';
+import {PanelSize} from '../../frontend/panel';
+import {NewTrackArgs} from '../../frontend/track';
+import {
+  Plugin,
+  PluginContext,
+  PluginContextTrace,
+  PluginDescriptor,
+} from '../../public';
+import {LONG, NUM} from '../../trace_processor/query_result';
 
 export const ANDROID_LOGS_TRACK_KIND = 'AndroidLogTrack';
 
@@ -31,8 +38,7 @@ export interface Data extends TrackData {
   numEvents: number;
 
   // Below: data quantized by resolution and aggregated by event priority.
-
-  timestamps: Float64Array;
+  timestamps: BigInt64Array;
 
   // Each Uint8 value has the i-th bit is set if there is at least one log
   // event at the i-th priority level at the corresponding time in |timestamps|.
@@ -58,10 +64,8 @@ const MARGIN_TOP = 2;
 const RECT_HEIGHT = 35;
 const EVT_PX = 2;  // Width of an event tick in pixels.
 
-class AndroidLogTrackController extends TrackController<Config, Data> {
-  static readonly kind = ANDROID_LOGS_TRACK_KIND;
-
-  async onBoundsChange(start: TPTime, end: TPTime, resolution: TPDuration):
+class AndroidLogTrackController extends TrackControllerAdapter<Config, Data> {
+  async onBoundsChange(start: time, end: time, resolution: duration):
       Promise<Data> {
     const queryRes = await this.query(`
       select
@@ -80,14 +84,13 @@ class AndroidLogTrackController extends TrackController<Config, Data> {
       resolution,
       length: rowCount,
       numEvents: 0,
-      timestamps: new Float64Array(rowCount),
+      timestamps: new BigInt64Array(rowCount),
       priorities: new Uint8Array(rowCount),
     };
 
-
-    const it = queryRes.iter({tsQuant: NUM, prio: NUM, numEvents: NUM});
+    const it = queryRes.iter({tsQuant: LONG, prio: NUM, numEvents: NUM});
     for (let row = 0; it.valid(); it.next(), row++) {
-      result.timestamps[row] = fromNs(it.tsQuant);
+      result.timestamps[row] = it.tsQuant;
       const prio = Math.min(it.prio, 7);
       result.priorities[row] |= (1 << prio);
       result.numEvents += it.numEvents;
@@ -96,8 +99,7 @@ class AndroidLogTrackController extends TrackController<Config, Data> {
   }
 }
 
-class AndroidLogTrack extends Track<Config, Data> {
-  static readonly kind = ANDROID_LOGS_TRACK_KIND;
+class AndroidLogTrack extends TrackAdapter<Config, Data> {
   static create(args: NewTrackArgs): AndroidLogTrack {
     return new AndroidLogTrack(args);
   }
@@ -106,25 +108,18 @@ class AndroidLogTrack extends Track<Config, Data> {
     super(args);
   }
 
-  renderCanvas(ctx: CanvasRenderingContext2D): void {
-    const {visibleTimeScale, windowSpan} = globals.frontendLocalState;
+  renderCanvas(ctx: CanvasRenderingContext2D, size: PanelSize): void {
+    const {visibleTimeScale} = globals.timeline;
 
     const data = this.data();
 
     if (data === undefined) return;  // Can't possibly draw anything.
 
-    const dataStartPx = visibleTimeScale.tpTimeToPx(data.start);
-    const dataEndPx = visibleTimeScale.tpTimeToPx(data.end);
-    const visibleStartPx = windowSpan.start;
-    const visibleEndPx = windowSpan.end;
+    const dataStartPx = visibleTimeScale.timeToPx(data.start);
+    const dataEndPx = visibleTimeScale.timeToPx(data.end);
 
     checkerboardExcept(
-        ctx,
-        this.getHeight(),
-        visibleStartPx,
-        visibleEndPx,
-        dataStartPx,
-        dataEndPx);
+        ctx, this.getHeight(), 0, size.width, dataStartPx, dataEndPx);
 
     const quantWidth =
         Math.max(EVT_PX, visibleTimeScale.durationToPx(data.resolution));
@@ -137,19 +132,40 @@ class AndroidLogTrack extends Track<Config, Data> {
         }
         if (!hasEventsForCurColor) continue;
         ctx.fillStyle = LEVELS[lev].color;
-        const px = Math.floor(visibleTimeScale.secondsToPx(data.timestamps[i]));
+        const timestamp = Time.fromRaw(data.timestamps[i]);
+        const px = Math.floor(visibleTimeScale.timeToPx(timestamp));
         ctx.fillRect(px, MARGIN_TOP + blockH * lev, quantWidth, blockH);
       }  // for(lev)
     }    // for (timestamps)
   }
 }
 
-function activate(ctx: PluginContext) {
-  ctx.registerTrack(AndroidLogTrack);
-  ctx.registerTrackController(AndroidLogTrackController);
+class AndroidLog implements Plugin {
+  onActivate(_ctx: PluginContext): void {}
+
+  async onTraceLoad(ctx: PluginContextTrace): Promise<void> {
+    const result =
+        await ctx.engine.query(`select count(1) as cnt from android_logs`);
+    const count = result.firstRow({cnt: NUM}).cnt;
+    if (count > 0) {
+      ctx.registerStaticTrack({
+        uri: 'perfetto.AndroidLog',
+        displayName: 'Android logs',
+        kind: ANDROID_LOGS_TRACK_KIND,
+        track: ({trackKey}) => {
+          return new TrackWithControllerAdapter<Config, Data>(
+              ctx.engine,
+              trackKey,
+              {},
+              AndroidLogTrack,
+              AndroidLogTrackController);
+        },
+      });
+    }
+  }
 }
 
-export const plugin = {
+export const plugin: PluginDescriptor = {
   pluginId: 'perfetto.AndroidLog',
-  activate,
+  plugin: AndroidLog,
 };

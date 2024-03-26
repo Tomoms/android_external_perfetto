@@ -52,6 +52,21 @@ message TraceConfig {
       DISCARD = 2;
     }
     optional FillPolicy fill_policy = 4;
+
+    // When true the buffer is moved (rather than copied) onto the cloned
+    // session, and an empty buffer of the same size is allocated in the source
+    // tracing session. This feature will likely get deprecated in the future.
+    // It been introduced mainly to support the surfaceflinger snapshot dump
+    // for bugreports, where SF can dumps O(400MB) into the bugreport trace. In
+    // that case we don't want to retain another in-memory copy of the buffer.
+    optional bool transfer_on_clone = 5;
+
+    // Used in conjuction with transfer_on_clone. When true the buffer is
+    // cleared before issuing the Flush(reason=kTraceClone). This is to ensure
+    // that if the data source took too long to write the data in a previous
+    // clone-related flush, we don't end up with a mixture of leftovers from
+    // the previous write and new data.
+    optional bool clear_before_clone = 6;
   }
   repeated BufferConfig buffers = 1;
 
@@ -138,7 +153,7 @@ message TraceConfig {
   // long (e.g. 24h) traces, where suspend can inflate them to weeks of
   // wall-time, making them more likely to hit device reboots (and hence loss).
   // This option also changes consistently the semantic of
-  // TrigerConfig.stop_delay_ms.
+  // TriggerConfig.stop_delay_ms.
   optional bool prefer_suspend_clock_for_duration = 36;
 
   // This is set when --dropbox is passed to the Perfetto command line client
@@ -560,6 +575,30 @@ message TraceConfig {
       // |atrace_post_tgid_starts_with|. The regex matching is only performed if
       // this check succeeds.
       SFP_ATRACE_MATCH_BREAK = 4;
+
+      // Tries to repeatedly search (i.e. find substrings of) the string field
+      // with |regex_pattern|. For each match, redacts any matching groups (i.e.
+      // replaced with a constant string). Once there are no further matches,
+      // filtering is terminated (i.e. no further rules are checked).
+      //
+      // Note that this is policy is a "search" policy not a "match" policy
+      // unlike the above policies:
+      //  * Match policies require matching the full string i.e. there is an
+      //    implicit leading `^` and trailing `$`.
+      //  * Search policies perform repeated partial matching of the string
+      //    e.g.
+      //      - String: `foo=aaa,bar=123,foo=bbb,baz=456`
+      //      - Pattern: `foo=(\d+)`
+      //      - Output: `foo=P6O,bar=123,foo=P6O,baz=456`
+      //    where P6O is the redaction string
+      //
+      // All of this is only performed after some pre-work where we try to parse
+      // the string field as an atrace tracepoint and check if the post-tgid
+      // field starts with |atrace_post_tgid_starts_with|.
+      //
+      // If there are no partial matches, the string is left unchanged and the
+      // next rule in chain is considered.
+      SFP_ATRACE_REPEATED_SEARCH_REDACT_GROUPS = 5;
     }
 
     // A rule specifies how strings should be filtered.

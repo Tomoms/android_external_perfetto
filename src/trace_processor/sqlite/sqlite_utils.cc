@@ -18,6 +18,8 @@
 #include <bitset>
 #include <sstream>
 #include "perfetto/base/status.h"
+#include "perfetto/ext/base/string_utils.h"
+#include "perfetto/trace_processor/basic_types.h"
 
 namespace perfetto {
 namespace trace_processor {
@@ -136,6 +138,8 @@ base::Status GetColumnsForTable(sqlite3* db,
                base::CaseInsensitiveEqual(raw_type, "BOOLEAN") ||
                base::CaseInsensitiveEqual(raw_type, "INTEGER")) {
       type = SqlValue::Type::kLong;
+    } else if (base::CaseInsensitiveEqual(raw_type, "BLOB")) {
+      type = SqlValue::Type::kBytes;
     } else if (!*raw_type) {
       PERFETTO_DLOG("Unknown column type for %s %s", raw_table_name.c_str(),
                     name);
@@ -173,6 +177,61 @@ const char* SqliteTypeToFriendlyString(SqlValue::Type type) {
       return "BYTES/PROTO";
   }
   PERFETTO_FATAL("For GCC");
+}
+
+base::Status CheckArgCount(const char* function_name,
+                           size_t argc,
+                           size_t expected_argc) {
+  if (argc == expected_argc) {
+    return base::OkStatus();
+  }
+  return base::ErrStatus("%s: expected %zu arguments, got %zu", function_name,
+                         expected_argc, argc);
+}
+
+base::StatusOr<int64_t> ExtractIntArg(const char* function_name,
+                                      const char* arg_name,
+                                      sqlite3_value* sql_value) {
+  SqlValue value = SqliteValueToSqlValue(sql_value);
+  std::optional<int64_t> result;
+
+  base::Status status = ExtractFromSqlValue(value, result);
+  if (!status.ok()) {
+    return base::ErrStatus("%s(%s): %s", function_name, arg_name,
+                           status.message().c_str());
+  }
+  PERFETTO_CHECK(result);
+  return *result;
+}
+
+base::StatusOr<double> ExtractDoubleArg(const char* function_name,
+                                        const char* arg_name,
+                                        sqlite3_value* sql_value) {
+  SqlValue value = SqliteValueToSqlValue(sql_value);
+  std::optional<double> result;
+
+  base::Status status = ExtractFromSqlValue(value, result);
+  if (!status.ok()) {
+    return base::ErrStatus("%s(%s): %s", function_name, arg_name,
+                           status.message().c_str());
+  }
+  PERFETTO_CHECK(result);
+  return *result;
+}
+
+base::StatusOr<std::string> ExtractStringArg(const char* function_name,
+                                             const char* arg_name,
+                                             sqlite3_value* sql_value) {
+  SqlValue value = SqliteValueToSqlValue(sql_value);
+  std::optional<const char*> result;
+
+  base::Status status = ExtractFromSqlValue(value, result);
+  if (!status.ok()) {
+    return base::ErrStatus("%s(%s): %s", function_name, arg_name,
+                           status.message().c_str());
+  }
+  PERFETTO_CHECK(result);
+  return std::string(*result);
 }
 
 base::Status TypeCheckSqliteValue(sqlite3_value* value,

@@ -87,11 +87,11 @@ SLICE_TABLE = Table(
             'parent_id':
                 '''
                   The id of the parent (i.e. immediate ancestor) slice for this
-                  slice
+                  slice.
                 ''',
             'arg_set_id':
                 ColumnDoc(
-                    'The id of the argument set associated with this slice',
+                    'The id of the argument set associated with this slice.',
                     joinable='args.arg_set_id'),
             'thread_ts':
                 '''
@@ -120,96 +120,6 @@ SLICE_TABLE = Table(
                 ''',
         }))
 
-SCHED_SLICE_TABLE = Table(
-    python_module=__file__,
-    class_name='SchedSliceTable',
-    sql_name='sched_slice',
-    columns=[
-        C('ts', CppInt64(), flags=ColumnFlag.SORTED),
-        C('dur', CppInt64()),
-        C('cpu', CppUint32()),
-        C('utid', CppUint32()),
-        C('end_state', CppString()),
-        C('priority', CppInt32()),
-    ],
-    tabledoc=TableDoc(
-        doc='''
-          This table holds slices with kernel thread scheduling information.
-          These slices are collected when the Linux "ftrace" data source is
-          used with the "sched/switch" and "sched/wakeup*" events enabled.
-        ''',
-        group='Events',
-        columns={
-            'ts':
-                '''The timestamp at the start of the slice (in nanoseconds).''',
-            'dur':
-                '''The duration of the slice (in nanoseconds).''',
-            'utid':
-                '''The thread's unique id in the trace..''',
-            'cpu':
-                '''The CPU that the slice executed on.''',
-            'end_state':
-                '''
-                  A string representing the scheduling state of the kernel
-                  thread at the end of the slice.  The individual characters in
-                  the string mean the following: R (runnable), S (awaiting a
-                  wakeup), D (in an uninterruptible sleep), T (suspended),
-                  t (being traced), X (exiting), P (parked), W (waking),
-                  I (idle), N (not contributing to the load average),
-                  K (wakeable on fatal signals) and Z (zombie, awaiting
-                  cleanup).
-                ''',
-            'priority':
-                '''The kernel priority that the thread ran at.'''
-        }))
-
-THREAD_STATE_TABLE = Table(
-    python_module=__file__,
-    class_name='ThreadStateTable',
-    sql_name='thread_state',
-    columns=[
-        C('ts', CppInt64()),
-        C('dur', CppInt64()),
-        C('cpu', CppOptional(CppUint32())),
-        C('utid', CppUint32()),
-        C('state', CppString()),
-        C('io_wait', CppOptional(CppUint32())),
-        C('blocked_function', CppOptional(CppString())),
-        C('waker_utid', CppOptional(CppUint32())),
-    ],
-    tabledoc=TableDoc(
-        doc='''
-          This table contains the scheduling state of every thread on the
-          system during the trace. It is a subset of the |sched_slice| (sched)
-          table which only contains the times where threads were actually
-          scheduled.
-        ''',
-        group='Events',
-        columns={
-            'ts':
-                'The timestamp at the start of the slice (in nanoseconds).',
-            'dur':
-                'The duration of the slice (in nanoseconds).',
-            'cpu':
-                '''The CPU that the slice executed on.''',
-            'utid':
-                '''The thread's unique id in the trace..''',
-            'state':
-                '''
-                  The scheduling state of the thread. Can be "Running" or any
-                  of the states described in |sched_slice.end_state|.
-                ''',
-            'io_wait':
-                'Indicates whether this thread was blocked on IO.',
-            'blocked_function':
-                'The function in the kernel this thread was blocked on.',
-            'waker_utid':
-                '''
-                  The unique thread id of the thread which caused a wakeup of
-                  this thread.
-                '''
-        }))
-
 GPU_SLICE_TABLE = Table(
     python_module=__file__,
     class_name='GpuSliceTable',
@@ -230,7 +140,7 @@ GPU_SLICE_TABLE = Table(
     parent=SLICE_TABLE,
     tabledoc=TableDoc(
         doc='''''',
-        group='Events',
+        group='Slice',
         columns={
             'context_id': '''''',
             'render_target': '''''',
@@ -259,7 +169,7 @@ GRAPHICS_FRAME_SLICE_TABLE = Table(
     parent=SLICE_TABLE,
     tabledoc=TableDoc(
         doc='''''',
-        group='Events',
+        group='Slice',
         columns={
             'frame_number': '''''',
             'layer_name': '''''',
@@ -280,13 +190,24 @@ EXPECTED_FRAME_TIMELINE_SLICE_TABLE = Table(
     ],
     parent=SLICE_TABLE,
     tabledoc=TableDoc(
-        doc='''''',
-        group='Events',
+        doc='''
+        This table contains information on the expected timeline of either
+        a display frame or a surface frame.
+        ''',
+        group='Slice',
         columns={
-            'display_frame_token': '''''',
-            'surface_frame_token': '''''',
-            'upid': '''''',
-            'layer_name': ''''''
+            'display_frame_token':
+                'Display frame token (vsync id).',
+            'surface_frame_token':
+                '''
+                Surface frame token (vsync id), null if this is a display frame.
+                ''',
+            'upid':
+                '''
+                Unique process id of the app that generates the surface frame.
+                ''',
+            'layer_name':
+                'Layer name if this is a surface frame.',
         }))
 
 ACTUAL_FRAME_TIMELINE_SLICE_TABLE = Table(
@@ -302,24 +223,48 @@ ACTUAL_FRAME_TIMELINE_SLICE_TABLE = Table(
         C('on_time_finish', CppInt32()),
         C('gpu_composition', CppInt32()),
         C('jank_type', CppString()),
+        C('jank_severity_type', CppString()),
         C('prediction_type', CppString()),
         C('jank_tag', CppString()),
     ],
     parent=SLICE_TABLE,
     tabledoc=TableDoc(
-        doc='''''',
-        group='Events',
+        doc='''
+        This table contains information on the actual timeline and additional
+        analysis related to the performance of either a display frame or a
+        surface frame.
+        ''',
+        group='Slice',
         columns={
-            'display_frame_token': '''''',
-            'surface_frame_token': '''''',
-            'upid': '''''',
-            'layer_name': '''''',
-            'present_type': '''''',
-            'on_time_finish': '''''',
-            'gpu_composition': '''''',
-            'jank_type': '''''',
-            'prediction_type': '''''',
-            'jank_tag': ''''''
+            'display_frame_token':
+                'Display frame token (vsync id).',
+            'surface_frame_token':
+                '''
+                Surface frame token (vsync id), null if this is a display frame.
+                ''',
+            'upid':
+                '''
+                Unique process id of the app that generates the surface frame.
+                ''',
+            'layer_name':
+                'Layer name if this is a surface frame.',
+            'present_type':
+                'Frame\'s present type (eg. on time / early / late).',
+            'on_time_finish':
+                'Whether the frame finishes on time.',
+            'gpu_composition':
+                'Whether the frame used gpu composition.',
+            'jank_type':
+                '''
+                Specify the jank types for this frame if there's jank, or
+                none if no jank occured.
+                ''',
+            'jank_severity_type':
+                'Severity of the jank: none if no jank.',
+            'prediction_type':
+                'Frame\'s prediction type (eg. valid / expired).',
+            'jank_tag':
+                'Jank tag based on jank type, used for slice visualization.'
         }))
 
 EXPERIMENTAL_FLAT_SLICE_TABLE = Table(
@@ -342,7 +287,7 @@ EXPERIMENTAL_FLAT_SLICE_TABLE = Table(
           An experimental table which "flattens" stacks of slices to contain
           only the "deepest" slice at any point in time on each track.
         ''',
-        group='Misc',
+        group='Slice',
         columns={
             'ts':
                 '''The timestamp at the start of the slice (in nanoseconds).''',
@@ -363,7 +308,7 @@ EXPERIMENTAL_FLAT_SLICE_TABLE = Table(
                 ''',
             'arg_set_id':
                 ColumnDoc(
-                    'The id of the argument set associated with this slice',
+                    'The id of the argument set associated with this slice.',
                     joinable='args.arg_set_id'),
             'source_id':
                 'The id of the slice which this row originated from.',
@@ -376,7 +321,5 @@ ALL_TABLES = [
     EXPERIMENTAL_FLAT_SLICE_TABLE,
     GPU_SLICE_TABLE,
     GRAPHICS_FRAME_SLICE_TABLE,
-    SCHED_SLICE_TABLE,
     SLICE_TABLE,
-    THREAD_STATE_TABLE,
 ]

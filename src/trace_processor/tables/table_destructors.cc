@@ -20,9 +20,11 @@
 #include "src/trace_processor/tables/memory_tables_py.h"
 #include "src/trace_processor/tables/metadata_tables_py.h"
 #include "src/trace_processor/tables/profiler_tables_py.h"
+#include "src/trace_processor/tables/sched_tables_py.h"
 #include "src/trace_processor/tables/slice_tables_py.h"
 #include "src/trace_processor/tables/trace_proto_tables_py.h"
 #include "src/trace_processor/tables/track_tables_py.h"
+#include "src/trace_processor/tables/winscope_tables_py.h"
 
 namespace perfetto {
 namespace trace_processor {
@@ -71,13 +73,16 @@ PackageListTable::~PackageListTable() = default;
 ProfilerSmapsTable::~ProfilerSmapsTable() = default;
 GpuCounterGroupTable::~GpuCounterGroupTable() = default;
 
+// sched_tables_py.h
+SchedSliceTable::~SchedSliceTable() = default;
+SpuriousSchedWakeupTable::~SpuriousSchedWakeupTable() = default;
+ThreadStateTable::~ThreadStateTable() = default;
+
 // slice_tables_py.h
 SliceTable::~SliceTable() = default;
 FlowTable::~FlowTable() = default;
-SchedSliceTable::~SchedSliceTable() = default;
 GpuSliceTable::~GpuSliceTable() = default;
 GraphicsFrameSliceTable::~GraphicsFrameSliceTable() = default;
-ThreadStateTable::~ThreadStateTable() = default;
 ExpectedFrameTimelineSliceTable::~ExpectedFrameTimelineSliceTable() = default;
 ActualFrameTimelineSliceTable::~ActualFrameTimelineSliceTable() = default;
 ExperimentalFlatSliceTable::~ExperimentalFlatSliceTable() = default;
@@ -109,6 +114,16 @@ MemorySnapshotTable::~MemorySnapshotTable() = default;
 ProcessMemorySnapshotTable::~ProcessMemorySnapshotTable() = default;
 MemorySnapshotNodeTable::~MemorySnapshotNodeTable() = default;
 MemorySnapshotEdgeTable::~MemorySnapshotEdgeTable() = default;
+
+// winscope_tables_py.h
+SurfaceFlingerLayersSnapshotTable::~SurfaceFlingerLayersSnapshotTable() =
+    default;
+SurfaceFlingerLayerTable::~SurfaceFlingerLayerTable() = default;
+SurfaceFlingerTransactionsTable::~SurfaceFlingerTransactionsTable() = default;
+WindowManagerShellTransitionsTable::~WindowManagerShellTransitionsTable() =
+    default;
+WindowManagerShellTransitionHandlersTable::
+    ~WindowManagerShellTransitionHandlersTable() = default;
 
 }  // namespace tables
 

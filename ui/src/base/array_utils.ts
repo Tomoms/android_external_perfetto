@@ -31,3 +31,17 @@ export function range(n: number): number[] {
 export function allUnique(x: string[]): boolean {
   return x.length == new Set(x).size;
 }
+
+// Check whether two arrays are identical.
+export function arrayEquals<T>(a: ArrayLike<T>, b: ArrayLike<T>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+export function isArrayOf<P, Q>(
+    predicate: (x: P|Q) => x is P, xs: (P|Q)[]): xs is P[] {
+  return xs.every(predicate);
+}

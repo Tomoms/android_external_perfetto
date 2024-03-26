@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 The Android Open Source Project
+ * Copyright (C) 2023 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,13 +17,9 @@
 #ifndef INCLUDE_PERFETTO_EXT_TRACING_IPC_DEFAULT_SOCKET_H_
 #define INCLUDE_PERFETTO_EXT_TRACING_IPC_DEFAULT_SOCKET_H_
 
-#include "perfetto/base/export.h"
-
-namespace perfetto {
-
-PERFETTO_EXPORT_COMPONENT const char* GetConsumerSocket();
-PERFETTO_EXPORT_COMPONENT const char* GetProducerSocket();
-
-}  // namespace perfetto
+// TODO(khokhlov): Migrate usages of "perfetto/ext/tracing/ipc/default_socket.h"
+// in Chromium to include "perfetto/tracing/internal/default_socket.h" instead,
+// then delete this file.
+#include "perfetto/tracing/default_socket.h"
 
 #endif  // INCLUDE_PERFETTO_EXT_TRACING_IPC_DEFAULT_SOCKET_H_

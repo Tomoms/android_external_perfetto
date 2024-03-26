@@ -42,9 +42,11 @@
 #include "src/trace_processor/tables/memory_tables_py.h"
 #include "src/trace_processor/tables/metadata_tables_py.h"
 #include "src/trace_processor/tables/profiler_tables_py.h"
+#include "src/trace_processor/tables/sched_tables_py.h"
 #include "src/trace_processor/tables/slice_tables_py.h"
 #include "src/trace_processor/tables/trace_proto_tables_py.h"
 #include "src/trace_processor/tables/track_tables_py.h"
+#include "src/trace_processor/tables/winscope_tables_py.h"
 #include "src/trace_processor/types/variadic.h"
 #include "src/trace_processor/views/slice_views.h"
 
@@ -457,6 +459,13 @@ class TraceStorage {
   const tables::SliceTable& slice_table() const { return slice_table_; }
   tables::SliceTable* mutable_slice_table() { return &slice_table_; }
 
+  const tables::SpuriousSchedWakeupTable& spurious_sched_wakeup_table() const {
+    return spurious_sched_wakeup_table_;
+  }
+  tables::SpuriousSchedWakeupTable* mutable_spurious_sched_wakeup_table() {
+    return &spurious_sched_wakeup_table_;
+  }
+
   const tables::FlowTable& flow_table() const { return flow_table_; }
   tables::FlowTable* mutable_flow_table() { return &flow_table_; }
 
@@ -704,6 +713,49 @@ class TraceStorage {
     return &actual_frame_timeline_slice_table_;
   }
 
+  const tables::SurfaceFlingerLayersSnapshotTable&
+  surfaceflinger_layers_snapshot_table() const {
+    return surfaceflinger_layers_snapshot_table_;
+  }
+  tables::SurfaceFlingerLayersSnapshotTable*
+  mutable_surfaceflinger_layers_snapshot_table() {
+    return &surfaceflinger_layers_snapshot_table_;
+  }
+
+  const tables::SurfaceFlingerLayerTable& surfaceflinger_layer_table() const {
+    return surfaceflinger_layer_table_;
+  }
+  tables::SurfaceFlingerLayerTable* mutable_surfaceflinger_layer_table() {
+    return &surfaceflinger_layer_table_;
+  }
+
+  const tables::SurfaceFlingerTransactionsTable&
+  surfaceflinger_transactions_table() const {
+    return surfaceflinger_transactions_table_;
+  }
+  tables::SurfaceFlingerTransactionsTable*
+  mutable_surfaceflinger_transactions_table() {
+    return &surfaceflinger_transactions_table_;
+  }
+
+  const tables::WindowManagerShellTransitionsTable&
+  window_manager_shell_transitions_table() const {
+    return window_manager_shell_transitions_table_;
+  }
+  tables::WindowManagerShellTransitionsTable*
+  mutable_window_manager_shell_transitions_table() {
+    return &window_manager_shell_transitions_table_;
+  }
+
+  const tables::WindowManagerShellTransitionHandlersTable&
+  window_manager_shell_transition_handlers_table() const {
+    return window_manager_shell_transition_handlers_table_;
+  }
+  tables::WindowManagerShellTransitionHandlersTable*
+  mutable_window_manager_shell_transition_handlers_table() {
+    return &window_manager_shell_transition_handlers_table_;
+  }
+
   const tables::ExperimentalProtoPathTable& experimental_proto_path_table()
       const {
     return experimental_proto_path_table_;
@@ -888,6 +940,8 @@ class TraceStorage {
   // Slices from CPU scheduling data.
   tables::SchedSliceTable sched_slice_table_{&string_pool_};
 
+  tables::SpuriousSchedWakeupTable spurious_sched_wakeup_table_{&string_pool_};
+
   // Additional attributes for virtual track slices (sub-type of
   // NestableSlices).
   VirtualTrackSlices virtual_track_slices_;
@@ -952,6 +1006,17 @@ class TraceStorage {
       &string_pool_, &slice_table_};
   tables::ActualFrameTimelineSliceTable actual_frame_timeline_slice_table_{
       &string_pool_, &slice_table_};
+
+  // Winscope tables
+  tables::SurfaceFlingerLayersSnapshotTable
+      surfaceflinger_layers_snapshot_table_{&string_pool_};
+  tables::SurfaceFlingerLayerTable surfaceflinger_layer_table_{&string_pool_};
+  tables::SurfaceFlingerTransactionsTable surfaceflinger_transactions_table_{
+      &string_pool_};
+  tables::WindowManagerShellTransitionsTable
+      window_manager_shell_transitions_table_{&string_pool_};
+  tables::WindowManagerShellTransitionHandlersTable
+      window_manager_shell_transition_handlers_table_{&string_pool_};
 
   tables::ExperimentalProtoPathTable experimental_proto_path_table_{
       &string_pool_};

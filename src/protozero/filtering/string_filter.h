@@ -18,6 +18,8 @@
 #define SRC_PROTOZERO_FILTERING_STRING_FILTER_H_
 
 #include <regex>
+#include <string>
+#include <string_view>
 
 namespace protozero {
 
@@ -30,6 +32,7 @@ class StringFilter {
     kAtraceMatchRedactGroups = 2,
     kMatchBreak = 3,
     kAtraceMatchBreak = 4,
+    kAtraceRepeatedSearchRedactGroups = 5,
   };
 
   // Adds a new rule for filtering strings.
@@ -39,7 +42,7 @@ class StringFilter {
 
   // Tries to filter the given string. Returns true if the string was modified
   // in any way, false otherwise.
-  bool MaybeFilter(char* ptr, size_t len) {
+  bool MaybeFilter(char* ptr, size_t len) const {
     if (len == 0 || rules_.empty()) {
       return false;
     }
@@ -53,7 +56,7 @@ class StringFilter {
     std::string atrace_payload_starts_with;
   };
 
-  bool MaybeFilterInternal(char* ptr, size_t len);
+  bool MaybeFilterInternal(char* ptr, size_t len) const;
 
   std::vector<Rule> rules_;
 };

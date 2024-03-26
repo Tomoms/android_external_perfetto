@@ -12,20 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {BigintMath} from '../base/bigint_math';
 import {sqliteString} from '../base/string_utils';
-import {Engine} from '../common/engine';
-import {NUM, STR} from '../common/query_result';
-import {escapeSearchQuery} from '../common/query_utils';
-import {CurrentSearchResults, SearchSummary} from '../common/search_data';
-import {Span} from '../common/time';
 import {
-  TPDuration,
-  TPTime,
-  TPTimeSpan,
-} from '../common/time';
+  Duration,
+  duration,
+  Span,
+  time,
+  Time,
+  TimeSpan,
+} from '../base/time';
+import {exists} from '../base/utils';
+import {pluginManager} from '../common/plugins';
+import {CurrentSearchResults, SearchSummary} from '../common/search_data';
+import {OmniboxState} from '../common/state';
 import {globals} from '../frontend/globals';
 import {publishSearch, publishSearchResult} from '../frontend/publish';
+import {Engine} from '../trace_processor/engine';
+import {LONG, NUM, STR} from '../trace_processor/query_result';
+import {escapeSearchQuery} from '../trace_processor/query_utils';
+import {CPU_SLICE_TRACK_KIND} from '../tracks/cpu_slices';
 
 import {Controller} from './controller';
 
@@ -35,17 +40,16 @@ export interface SearchControllerArgs {
 
 export class SearchController extends Controller<'main'> {
   private engine: Engine;
-  private previousSpan: Span<TPTime>;
-  private previousResolution: TPDuration;
-  private previousSearch: string;
+  private previousSpan: Span<time, duration>;
+  private previousResolution: duration;
+  private previousOmniboxState?: OmniboxState;
   private updateInProgress: boolean;
   private setupInProgress: boolean;
 
   constructor(args: SearchControllerArgs) {
     super('main');
     this.engine = args.engine;
-    this.previousSpan = new TPTimeSpan(0n, 1n);
-    this.previousSearch = '';
+    this.previousSpan = new TimeSpan(Time.fromRaw(0n), Time.fromRaw(1n));
     this.updateInProgress = false;
     this.setupInProgress = true;
     this.previousResolution = 1n;
@@ -76,11 +80,11 @@ export class SearchController extends Controller<'main'> {
       return;
     }
     const newSpan = globals.stateVisibleTime();
-    const newSearch = omniboxState.omnibox;
+    const newOmniboxState = omniboxState;
     const newResolution = visibleState.resolution;
     if (this.previousSpan.contains(newSpan) &&
         this.previousResolution === newResolution &&
-        newSearch === this.previousSearch) {
+        this.previousOmniboxState === newOmniboxState) {
       return;
     }
 
@@ -89,21 +93,22 @@ export class SearchController extends Controller<'main'> {
     // that is not easily available here.
     // N.B. Timestamps can be negative.
     const {start, end} = newSpan.pad(newSpan.duration);
-    this.previousSpan = new TPTimeSpan(start, end);
+    this.previousSpan = new TimeSpan(start, end);
     this.previousResolution = newResolution;
-    this.previousSearch = newSearch;
-    if (newSearch === '' || newSearch.length < 4) {
+    this.previousOmniboxState = newOmniboxState;
+    const search = newOmniboxState.omnibox;
+    if (search === '' || (search.length < 4 && !newOmniboxState.force)) {
       publishSearch({
-        tsStarts: new Float64Array(0),
-        tsEnds: new Float64Array(0),
+        tsStarts: new BigInt64Array(0),
+        tsEnds: new BigInt64Array(0),
         count: new Uint8Array(0),
       });
       publishSearchResult({
         sliceIds: new Float64Array(0),
-        tsStarts: new Float64Array(0),
+        tsStarts: new BigInt64Array(0),
         utids: new Float64Array(0),
         sources: [],
-        trackIds: [],
+        trackKeys: [],
         totalResults: 0,
       });
       return;
@@ -111,15 +116,14 @@ export class SearchController extends Controller<'main'> {
 
     this.updateInProgress = true;
     const computeSummary =
-        this.update(newSearch, newSpan.start, newSpan.end, newResolution)
+        this.update(search, newSpan.start, newSpan.end, newResolution)
             .then((summary) => {
               publishSearch(summary);
             });
 
-    const computeResults =
-        this.specificSearch(newSearch).then((searchResults) => {
-          publishSearchResult(searchResults);
-        });
+    const computeResults = this.specificSearch(search).then((searchResults) => {
+      publishSearchResult(searchResults);
+    });
 
     Promise.all([computeSummary, computeResults])
         .finally(() => {
@@ -131,18 +135,18 @@ export class SearchController extends Controller<'main'> {
   onDestroy() {}
 
   private async update(
-      search: string, startNs: TPTime, endNs: TPTime,
-      resolution: TPDuration): Promise<SearchSummary> {
+      search: string, start: time, end: time,
+      resolution: duration): Promise<SearchSummary> {
     const searchLiteral = escapeSearchQuery(search);
 
-    const quantumNs = resolution * 10n;
-    startNs = BigintMath.quantizeFloor(startNs, quantumNs);
+    const quantum = resolution * 10n;
+    start = Time.quantFloor(start, quantum);
 
-    const windowDur = BigintMath.max(endNs - startNs, 1n);
+    const windowDur = Duration.max(Time.diff(end, start), 1n);
     await this.query(`update search_summary_window set
-      window_start=${startNs},
+      window_start=${start},
       window_dur=${windowDur},
-      quantum=${quantumNs}
+      quantum=${quantum}
       where rowid = 0;`);
 
     const utidRes = await this.query(`select utid from thread join process
@@ -159,8 +163,8 @@ export class SearchController extends Controller<'main'> {
 
     const res = await this.query(`
         select
-          (quantum_ts * ${quantumNs} + ${startNs})/1e9 as tsStart,
-          ((quantum_ts+1) * ${quantumNs} + ${startNs})/1e9 as tsEnd,
+          (quantum_ts * ${quantum} + ${start}) as tsStart,
+          ((quantum_ts+1) * ${quantum} + ${start}) as tsEnd,
           min(count(*), 255) as count
           from (
               select
@@ -177,13 +181,13 @@ export class SearchController extends Controller<'main'> {
           order by quantum_ts;`);
 
     const numRows = res.numRows();
-    const summary = {
-      tsStarts: new Float64Array(numRows),
-      tsEnds: new Float64Array(numRows),
+    const summary: SearchSummary = {
+      tsStarts: new BigInt64Array(numRows),
+      tsEnds: new BigInt64Array(numRows),
       count: new Uint8Array(numRows),
     };
 
-    const it = res.iter({tsStart: NUM, tsEnd: NUM, count: NUM});
+    const it = res.iter({tsStart: LONG, tsEnd: LONG, count: NUM});
     for (let row = 0; it.valid(); it.next(), ++row) {
       summary.tsStarts[row] = it.tsStart;
       summary.tsEnds[row] = it.tsEnd;
@@ -198,9 +202,12 @@ export class SearchController extends Controller<'main'> {
     // easier once the track table has entries for all the tracks.
     const cpuToTrackId = new Map();
     for (const track of Object.values(globals.state.tracks)) {
-      if (track.kind === 'CpuSliceTrack') {
-        cpuToTrackId.set((track.config as {cpu: number}).cpu, track.id);
-        continue;
+      if (exists(track?.uri)) {
+        const trackInfo = pluginManager.resolveTrackInfo(track.uri);
+        if (trackInfo?.kind === CPU_SLICE_TRACK_KIND) {
+          const cpu = trackInfo?.cpu;
+          cpu && cpuToTrackId.set(cpu, track.key);
+        }
       }
     }
 
@@ -259,26 +266,29 @@ export class SearchController extends Controller<'main'> {
     const rows = queryRes.numRows();
     const searchResults: CurrentSearchResults = {
       sliceIds: new Float64Array(rows),
-      tsStarts: new Float64Array(rows),
+      tsStarts: new BigInt64Array(rows),
       utids: new Float64Array(rows),
-      trackIds: [],
+      trackKeys: [],
       sources: [],
       totalResults: 0,
     };
 
     const it = queryRes.iter(
-        {sliceId: NUM, ts: NUM, source: STR, sourceId: NUM, utid: NUM});
+        {sliceId: NUM, ts: LONG, source: STR, sourceId: NUM, utid: NUM});
     for (; it.valid(); it.next()) {
       let trackId = undefined;
       if (it.source === 'cpu') {
         trackId = cpuToTrackId.get(it.sourceId);
       } else if (it.source === 'track') {
-        trackId = globals.state.uiTrackIdByTraceTrackId[it.sourceId];
+        trackId = globals.state.trackKeyByTrackId[it.sourceId];
       } else if (it.source === 'log') {
-        const logTracks = Object.values(globals.state.tracks)
-                              .filter((t) => t.kind === 'AndroidLogTrack');
+        const logTracks =
+            Object.values(globals.state.tracks).filter((track) => {
+              const trackDesc = pluginManager.resolveTrackInfo(track.uri);
+              return (trackDesc && trackDesc.kind === 'AndroidLogTrack');
+            });
         if (logTracks.length > 0) {
-          trackId = logTracks[0].id;
+          trackId = logTracks[0].key;
         }
       }
 
@@ -288,7 +298,7 @@ export class SearchController extends Controller<'main'> {
       }
 
       const i = searchResults.totalResults++;
-      searchResults.trackIds.push(trackId);
+      searchResults.trackKeys.push(trackId);
       searchResults.sources.push(it.source);
       searchResults.sliceIds[i] = it.sliceId;
       searchResults.tsStarts[i] = it.ts;
